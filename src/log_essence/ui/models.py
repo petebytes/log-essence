@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from log_essence import __version__
+
 RedactionModeType = Literal["disabled", "minimal", "moderate", "strict"]
 SeverityLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 OutputFormat = Literal["markdown", "json"]
@@ -105,7 +107,7 @@ class MetadataOutput(BaseModel):
     lines_processed: int = Field(description="Total lines processed")
     log_format: str = Field(description="Detected log format")
     timestamp: datetime = Field(description="When analysis was performed")
-    version: str = Field(default="0.1.0", description="log-essence version")
+    version: str = Field(default=__version__, description="log-essence version")
 
 
 class JSONOutput(BaseModel):

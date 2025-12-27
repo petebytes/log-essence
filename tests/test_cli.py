@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+from log_essence import __version__
 from log_essence.cli import create_parser, run_analysis
 from log_essence.config import (
     Config,
@@ -195,7 +196,7 @@ def test_run_analysis_json_output(tmp_path: Path, capsys) -> None:
     assert output["metadata"]["lines_processed"] == 3
     assert output["metadata"]["log_format"] == "docker"
     assert "timestamp" in output["metadata"]
-    assert output["metadata"]["version"] == "0.1.0"
+    assert output["metadata"]["version"] == __version__
 
     # Verify stats fields
     assert "processing_time_ms" in output["stats"]

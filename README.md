@@ -169,12 +169,12 @@ get_container_logs(
 )
 ```
 
-#### `get_compose_logs`
+#### `get_docker_logs`
 
-Analyze logs from all services in a docker-compose project.
+Analyze logs from Docker Compose services.
 
 ```python
-get_compose_logs(
+get_docker_logs(
     path="/path/to/project",
     services=["api", "worker"],
     since="30m"
@@ -203,6 +203,34 @@ search_logs(
     query="connection timeout",
     top_k=10
 )
+```
+
+#### `get_journald_logs`
+
+Analyze systemd journal logs.
+
+```python
+get_journald_logs(
+    unit="nginx.service",
+    since="1h",
+    priority="err"
+)
+```
+
+#### `list_containers`
+
+List running Docker containers.
+
+```python
+list_containers()
+```
+
+#### `list_docker_services`
+
+List Docker Compose services in a project.
+
+```python
+list_docker_services(path="/path/to/project")
 ```
 
 ## Secret Redaction

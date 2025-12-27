@@ -23,6 +23,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from log_essence import __version__
 from log_essence.config import load_config, merge_config_with_args
 from log_essence.server import (
     analyze_log_lines,
@@ -150,7 +151,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.1.0",
+        version=f"%(prog)s {__version__}",
     )
 
     return parser

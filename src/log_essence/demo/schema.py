@@ -77,7 +77,16 @@ class FillAction(BaseModel):
     text: str = Field(..., description="Text to fill")
 
 
-Action = NavigateAction | TypeAction | WaitAction | ScreenshotAction | ExecuteAction | ClearAction | ClickAction | FillAction
+Action = (
+    NavigateAction
+    | TypeAction
+    | WaitAction
+    | ScreenshotAction
+    | ExecuteAction
+    | ClearAction
+    | ClickAction
+    | FillAction
+)
 
 
 class Scene(BaseModel):
