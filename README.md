@@ -108,7 +108,7 @@ log-essence ui --port 8080
   - **Time**: Processing duration
   - **Redactions**: Number of secrets/PII items redacted
   - **Tokens**: Original → Output token count
-  - **Savings**: Compression percentage (typically 80-95%)
+  - **Savings**: Compression percentage achieved
 - **Download**: Export analysis as markdown file
 
 ### UI Options

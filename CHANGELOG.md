@@ -72,7 +72,7 @@ Initial beta release of log-essence.
 
 ### Technical Details
 
-- **Token compression**: Typically 80-95% reduction in log volume
+- **Token compression**: Significant reduction in log volume
 - **Supported Python**: 3.11+
 - **Dependencies**: fastmcp, drain3, fastembed, numpy, tiktoken, pyyaml
 

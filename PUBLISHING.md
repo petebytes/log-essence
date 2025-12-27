@@ -158,7 +158,7 @@ Current: "MCP Log Consolidator for LLM Analysis"
 
 **Recommended expanded description**:
 ```
-Intelligent log analysis tool that makes logs LLM-friendly. Uses Drain3 template extraction and semantic clustering to compress logs 80-95% while preserving signal. Features automatic secret/PII redaction, multi-source support (files, Docker, journald), and runs as CLI, web UI, or MCP server for Claude.
+Intelligent log analysis tool that makes logs LLM-friendly. Uses Drain3 template extraction and semantic clustering to significantly compress logs while preserving signal. Features automatic secret/PII redaction, multi-source support (files, Docker, journald), and runs as CLI, web UI, or MCP server for Claude.
 ```
 
 ## Version Numbering
@@ -207,7 +207,7 @@ Add these badges at the top of README.md after publishing:
 
 ### Key Selling Points to Emphasize
 
-1. **80-95% token reduction** - massive context savings for LLMs
+1. **Significant token reduction** - context savings for LLMs
 2. **Security-first** - automatic secret/PII redaction
 3. **Multi-source** - files, Docker, journald all supported
 4. **Claude integration** - native MCP server for Claude Desktop
