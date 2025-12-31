@@ -5,8 +5,8 @@ Extract the essence of your logs for LLM analysis.
 Analyzes log files using template extraction (Drain3) and semantic clustering (FastEmbed) to produce token-efficient summaries for LLM consumption. Includes automatic secret/PII redaction for safe external analysis.
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/6315501f-e209-4e33-8647-9b8800891e47" width="640" controls>
-    <a href="https://github.com/petebytes/log-essence/blob/main/demos/output/full-demo.mp4">Watch demo</a>
+  <video src="https://github.com/petebytes/log-essence/releases/download/v0.1.0b3/full-demo.mp4" width="640" controls>
+    Your browser does not support the video tag.
   </video>
 </p>
 
@@ -90,14 +90,15 @@ log-essence --serve
 A browser-based interface for quick log analysis without command-line setup.
 
 ```bash
-# Install with UI dependencies
-pip install log-essence[ui]
-
-# Launch the web UI
-log-essence ui
+# Using uvx (recommended - no installation needed)
+uvx --with log-essence[ui] log-essence ui
 
 # Or specify a custom port
-log-essence ui --port 8080
+uvx --with log-essence[ui] log-essence ui --port 8080
+
+# Using pip (if you prefer to install)
+pip install log-essence[ui]
+log-essence ui
 ```
 
 ### Features
