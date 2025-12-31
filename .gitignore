@@ -57,8 +57,12 @@ test-results/
 
 # Generated
 output/
-demos/output/
 src/log_essence/_version.py
+
+# Allow demo assets
+!demos/output/full-demo.mp4
+!demos/output/summary.png
+!demos/output/cli-output.png
 
 # Beads task tracking (local-only)
 .beads/
