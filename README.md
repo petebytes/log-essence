@@ -6,7 +6,7 @@ Analyzes log files using template extraction (Drain3) and semantic clustering (F
 
 <p align="center">
   <a href="https://github.com/petebytes/log-essence/releases/download/v0.1.0b3/full-demo.mp4">
-    <img src="https://raw.githubusercontent.com/petebytes/log-essence/main/demos/output/summary.png" alt="log-essence demo - click to watch video" width="640">
+    <img src="https://github.com/petebytes/log-essence/blob/main/demos/output/summary.png?raw=true" alt="log-essence demo - click to watch video" width="640">
   </a>
 </p>
 
