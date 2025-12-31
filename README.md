@@ -5,13 +5,14 @@ Extract the essence of your logs for LLM analysis.
 Analyzes log files using template extraction (Drain3) and semantic clustering (FastEmbed) to produce token-efficient summaries for LLM consumption. Includes automatic secret/PII redaction for safe external analysis.
 
 <p align="center">
-  <video src="https://github.com/petebytes/log-essence/releases/download/v0.1.0b3/full-demo.mp4" width="640" controls>
-    Your browser does not support the video tag.
-  </video>
+  <a href="https://github.com/petebytes/log-essence/releases/download/v0.1.0b3/full-demo.mp4">
+    <img src="demos/output/summary.png" alt="log-essence demo - click to watch video" width="640">
+  </a>
 </p>
 
 <p align="center">
-  <em>Raw logs → Token-efficient summary with automatic secret redaction</em>
+  <em>Raw logs → Token-efficient summary with automatic secret redaction</em><br>
+  <sub>▶️ <a href="https://github.com/petebytes/log-essence/releases/download/v0.1.0b3/full-demo.mp4">Click to watch demo video</a></sub>
 </p>
 
 ## Features
