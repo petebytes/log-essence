@@ -1,0 +1,61 @@
+# Dependabot Auto-Merge
+# Auto-approves and merges qualifying dependabot PRs after CI passes.
+# Decision matrix: patch/minor/dev-major/security → auto-merge, major prod → manual review.
+# Deployed to repos via scripts/deploy-security-automation.sh
+
+name: Dependabot Auto-Merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: write
+  issues: write
+
+jobs:
+  automerge:
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Auto-approve + auto-merge: patch, minor, dev-major, security (non-major-prod)
+      - name: Auto-approve qualifying PRs
+        if: >
+          contains(steps.metadata.outputs.update-type, 'semver-patch') ||
+          contains(steps.metadata.outputs.update-type, 'semver-minor') ||
+          (contains(steps.metadata.outputs.update-type, 'semver-major') && steps.metadata.outputs.dependency-type == 'direct:development')
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr review "$PR_URL" --approve -b "Auto-approved: ${{ steps.metadata.outputs.update-type }} (${{ steps.metadata.outputs.dependency-type }})"
+          gh pr merge "$PR_URL" --auto --squash
+
+      # Major prod deps: request manual review
+      - name: Comment on major prod dependency updates
+        if: >
+          contains(steps.metadata.outputs.update-type, 'semver-major') &&
+          steps.metadata.outputs.dependency-type == 'direct:production'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEP_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          gh pr comment "$PR_URL" --body "## Manual Review Required
+
+          This PR contains a **major version bump** for a production dependency:
+          - **Dependencies:** $DEP_NAMES
+          - **Update type:** $UPDATE_TYPE
+
+          Major production dependency updates are not auto-merged due to potential breaking changes.
+          Please review the changelog and test before merging."
+
+          gh pr edit "$PR_URL" --add-label "manual-review"
