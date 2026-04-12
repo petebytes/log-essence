@@ -49,6 +49,19 @@ jobs:
           DEP_NAMES: ${{ steps.metadata.outputs.dependency-names }}
           UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
         run: |
+          # Ensure the label exists (gh pr edit --add-label fails if the label
+          # isn't pre-defined in the repo). Try gh label create first (idempotent
+          # with --force), fall back to gh api for older runner CLI versions.
+          gh label create "manual-review" \
+            --color FBCA04 \
+            --description "Requires manual review (major prod dep)" \
+            --force 2>/dev/null || \
+          gh api -X POST "repos/$GITHUB_REPOSITORY/labels" \
+            -f name=manual-review \
+            -f color=FBCA04 \
+            -f description="Requires manual review (major prod dep)" \
+            --silent 2>/dev/null || true
+
           # Skip if we already commented (idempotency guard for synchronize/reopened events)
           EXISTING=$(gh pr view "$PR_URL" --json comments --jq '.comments[].body' | grep -c "## Manual Review Required" || true)
           if [ "$EXISTING" -eq 0 ]; then
