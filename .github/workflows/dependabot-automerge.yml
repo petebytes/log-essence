@@ -49,7 +49,10 @@ jobs:
           DEP_NAMES: ${{ steps.metadata.outputs.dependency-names }}
           UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
         run: |
-          gh pr comment "$PR_URL" --body "## Manual Review Required
+          # Skip if we already commented (idempotency guard for synchronize/reopened events)
+          EXISTING=$(gh pr view "$PR_URL" --json comments --jq '.comments[].body' | grep -c "## Manual Review Required" || true)
+          if [ "$EXISTING" -eq 0 ]; then
+            gh pr comment "$PR_URL" --body "## Manual Review Required
 
           This PR contains a **major version bump** for a production dependency:
           - **Dependencies:** $DEP_NAMES
@@ -57,5 +60,6 @@ jobs:
 
           Major production dependency updates are not auto-merged due to potential breaking changes.
           Please review the changelog and test before merging."
+          fi
 
           gh pr edit "$PR_URL" --add-label "manual-review"
