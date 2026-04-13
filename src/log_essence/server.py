@@ -135,6 +135,8 @@ def extract_timestamp(line: str, log_format: str) -> datetime | None:
     if log_format == "json":
         try:
             data = json.loads(line)
+            if not isinstance(data, dict):
+                return None
             for field in JSON_TIME_FIELDS:
                 if field in data:
                     ts_str = str(data[field])
@@ -485,9 +487,10 @@ def extract_severity(line: str, log_format: str) -> str | None:
     if log_format == "json":
         try:
             data = json.loads(line)
-            for field in JSON_LEVEL_FIELDS:
-                if field in data:
-                    return str(data[field]).upper()
+            if isinstance(data, dict):
+                for field in JSON_LEVEL_FIELDS:
+                    if field in data:
+                        return str(data[field]).upper()
         except json.JSONDecodeError:
             pass
 
