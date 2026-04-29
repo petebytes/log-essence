@@ -17,11 +17,10 @@ from typing import Any
 
 import numpy as np
 import tiktoken
-from drain3 import TemplateMiner
-from drain3.template_miner_config import TemplateMinerConfig
 from fastembed import TextEmbedding
 from fastmcp import FastMCP
 
+from log_essence._drain import TemplateMiner, TemplateMinerConfig
 from log_essence.redaction import RedactionMode, redact_lines
 from log_essence.ui.models import (
     AnalysisResult,

@@ -41,7 +41,6 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp>=3.2.0",
-    "drain3>=0.9.11",
     "fastembed>=0.4.0",
     "numpy>=1.26.0",
     "tiktoken>=0.7.0",
@@ -93,7 +92,6 @@ pythonpath = ["src"]
 
 [tool.uv]
 override-dependencies = [
-    "cachetools>=5.0.0",
     "pillow>=12.1.1",
 ]
 
