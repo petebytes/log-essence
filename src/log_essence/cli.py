@@ -47,9 +47,13 @@ DEFAULT_OUTPUT = "markdown"
 
 
 def _running_under_uvx() -> bool:
-    """Detect uvx ephemeral environment via cache-path heuristic."""
+    """Detect uv-managed tool environment.
+
+    Covers both ephemeral (~/.cache/uv/archive-v*) and persistent
+    (~/.local/share/uv/tools/<name>) install paths used by uvx / uv tool run.
+    """
     prefix = sys.prefix
-    return "/uv/" in prefix and ("archive-v" in prefix or "/tools/" not in prefix)
+    return "/uv/archive-v" in prefix or "/uv/tools/" in prefix
 
 
 def _handle_ui_missing(err: ImportError, args: argparse.Namespace) -> int:
