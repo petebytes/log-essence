@@ -16,7 +16,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import signal
+import subprocess
 import sys
 import time
 from datetime import UTC, datetime
@@ -41,6 +44,42 @@ DEFAULT_TOKEN_BUDGET = 8000
 DEFAULT_CLUSTERS = 10
 DEFAULT_REDACTION = "moderate"
 DEFAULT_OUTPUT = "markdown"
+
+
+def _running_under_uvx() -> bool:
+    """Detect uvx ephemeral environment via cache-path heuristic."""
+    prefix = sys.prefix
+    return "/uv/" in prefix and ("archive-v" in prefix or "/tools/" not in prefix)
+
+
+def _handle_ui_missing(err: ImportError, args: argparse.Namespace) -> int:
+    """Auto-relaunch under uvx with [ui] extras, else print install hint."""
+    if os.environ.get("LOG_ESSENCE_UI_BOOTSTRAP") == "1":
+        print(f"Error: UI bootstrap failed: {err}", file=sys.stderr)
+        return 1
+
+    if _running_under_uvx() and (uvx := shutil.which("uvx")):
+        print(
+            "UI deps missing. Relaunching via 'uvx --from log-essence[ui]'...",
+            file=sys.stderr,
+        )
+        cmd = [uvx, "--from", "log-essence[ui]", "log-essence", "ui"]
+        if getattr(args, "no_browser", False):
+            cmd.append("--no-browser")
+        if getattr(args, "port", None):
+            cmd.extend(["--port", str(args.port)])
+        env = {**os.environ, "LOG_ESSENCE_UI_BOOTSTRAP": "1"}
+        return subprocess.call(cmd, env=env)
+
+    print(
+        "Error: UI dependencies not installed.\n"
+        "  uvx:  uvx --from 'log-essence[ui]' log-essence ui\n"
+        "  pip:  pip install 'log-essence[ui]'\n"
+        "  uv:   uv tool install 'log-essence[ui]'",
+        file=sys.stderr,
+    )
+    print(f"Details: {err}", file=sys.stderr)
+    return 1
 
 
 def _add_analysis_args(parser: argparse.ArgumentParser) -> None:
@@ -622,12 +661,7 @@ def main() -> int:
             launch_ui(open_browser=open_browser, port=args.port)
             return 0
         except ImportError as e:
-            print(
-                "Error: UI dependencies not installed. Install with: pip install log-essence[ui]",
-                file=sys.stderr,
-            )
-            print(f"Details: {e}", file=sys.stderr)
-            return 1
+            return _handle_ui_missing(e, args)
 
     # Default: analyze (explicit subcommand or bare path)
     if args.command == "analyze":
