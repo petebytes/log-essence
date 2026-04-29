@@ -140,9 +140,7 @@ class Drain:
 
         return self._fast_match(node.cluster_ids, tokens)
 
-    def _seq_distance(
-        self, template: tuple[str, ...], tokens: list[str]
-    ) -> tuple[float, int]:
+    def _seq_distance(self, template: tuple[str, ...], tokens: list[str]) -> tuple[float, int]:
         if not template:
             return 1.0, 0
         sim = 0
@@ -185,9 +183,7 @@ class Drain:
         depth = 1
         for token in cluster.log_template_tokens:
             if depth >= self.max_node_depth or depth >= token_count:
-                live_ids = [
-                    cid for cid in node.cluster_ids if self._get_cluster(cid) is not None
-                ]
+                live_ids = [cid for cid in node.cluster_ids if self._get_cluster(cid) is not None]
                 live_ids.append(cluster.cluster_id)
                 node.cluster_ids = live_ids
                 break
@@ -195,9 +191,7 @@ class Drain:
             if token in node.key_to_child:
                 node = node.key_to_child[token]
             else:
-                use_param = (
-                    self.parametrize_numeric_tokens and self._has_numbers(token)
-                )
+                use_param = self.parametrize_numeric_tokens and self._has_numbers(token)
                 if use_param:
                     nxt = node.key_to_child.get(PARAM)
                     if nxt is None:
@@ -228,9 +222,7 @@ class Drain:
 
             depth += 1
 
-    def _merge_template(
-        self, tokens: list[str], template: tuple[str, ...]
-    ) -> list[str]:
+    def _merge_template(self, tokens: list[str], template: tuple[str, ...]) -> list[str]:
         out = list(tokens)
         for i, (t1, t2) in enumerate(zip(tokens, template, strict=False)):
             if t1 != t2:
