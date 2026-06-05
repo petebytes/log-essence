@@ -1,0 +1,26 @@
+# Local pre-commit checks via the pre-commit framework (https://pre-commit.com).
+# Mirrors CI so lint/format/secret issues surface in seconds, locally.
+#
+# Installs into .git/hooks, which the global git dispatcher (~/.config/git/hooks)
+# CHAINS to — so REPOMAP regen + Plane bootstrap keep running. Do NOT set a
+# repo-local core.hooksPath. Per-clone setup:
+#   uv tool install pre-commit       # or: brew install pre-commit
+#   pre-commit install               # only if NOT behind a global hooksPath dispatcher
+#
+# Fast, staged checks on every commit (ruff respects this repo's [tool.ruff]):
+#   ruff-check, ruff-format, gitleaks (secret scan)
+# CI remains the project-wide hard gate.
+default_install_hook_types: [pre-commit]
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.6
+    hooks:
+      - id: ruff-check
+        stages: [pre-commit]
+      - id: ruff-format
+        stages: [pre-commit]
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks # scans the staged diff; every leak blocks
+        stages: [pre-commit]
