@@ -64,6 +64,9 @@ src/log_essence/_version.py
 !demos/output/summary.png
 !demos/output/cli-output.png
 
+# Scratch space / local clones (e.g. comparison repos)
+tmp/
+
 # Beads task tracking (local-only)
 .beads/
 AGENTS.md
