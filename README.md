@@ -41,6 +41,10 @@ log-essence /var/log/app.log
 # Analyze with glob pattern
 log-essence "/var/log/*.log"
 
+# Read from stdin — pipe any command's output
+docker logs my-app 2>&1 | log-essence -
+journalctl --since "1h ago" --no-pager | log-essence -
+
 # Filter by severity
 log-essence /var/log/app.log --severity ERROR WARNING
 
@@ -150,6 +154,22 @@ Restart Claude Desktop. You'll see log-essence listed in the MCP servers (🔌 i
 The logs never leave your machine unredacted - log-essence strips sensitive data before Claude sees it, and the analysis runs locally using Drain3 and FastEmbed.
 
 ### Available Tools
+
+#### `discover_log_sources`
+
+Find log sources for a code project — project-scoped, so it returns the project's own log
+files (vendored/VCS/build dirs pruned), the containers and Compose file belonging to that
+project's Docker Compose stack, and — since most code projects log to stdout rather than
+files — the **run commands** (from `package.json` scripts) you can pipe in, plus any standard
+agent-instruction files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, …) that document how to run
+and where logs go. It does not surface machine-wide system logs or other projects'
+containers. Each result is annotated with the tool or command to use. Call this first when
+you don't know what's available.
+
+```python
+discover_log_sources()                 # scan the current directory
+discover_log_sources(path="/repo")     # scan a specific project
+```
 
 #### `get_logs`
 

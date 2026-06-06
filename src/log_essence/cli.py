@@ -267,9 +267,15 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # --- discover ---
-    subparsers.add_parser(
+    discover_parser = subparsers.add_parser(
         "discover",
-        help="Scan for analyzable log sources",
+        help="Scan a project for analyzable log sources",
+    )
+    discover_parser.add_argument(
+        "path",
+        nargs="?",
+        default=None,
+        help="Project directory to scan (default: current directory)",
     )
 
     # --- ui ---
@@ -350,32 +356,40 @@ def run_analysis(args: argparse.Namespace) -> int:
             print("Use formats like: 1h, 30m, 2d, 2025-01-01", file=sys.stderr)
             return 1
 
-    # Resolve path
-    log_files = resolve_glob_pattern(args.path)
-
-    if not log_files:
-        log_path = Path(args.path).expanduser().resolve()
-
-        if not log_path.exists():
-            print(f"Error: Path does not exist: {args.path}", file=sys.stderr)
+    # Read from stdin when path is "-" (e.g. `docker logs web | log-essence -`)
+    log_files: list[Path] = []
+    all_lines: list[str] = []
+    if args.path == "-":
+        if args.watch:
+            print("Error: watch mode requires a file path, not stdin (-)", file=sys.stderr)
             return 1
+        all_lines = sys.stdin.read().splitlines()
+    else:
+        # Resolve path
+        log_files = resolve_glob_pattern(args.path)
 
-        if log_path.is_file():
-            log_files = [log_path]
-        else:
-            log_files = list(log_path.glob("**/*.log")) + list(log_path.glob("**/*.txt"))
-            if not log_files:
-                print(f"Error: No log files found in {args.path}", file=sys.stderr)
+        if not log_files:
+            log_path = Path(args.path).expanduser().resolve()
+
+            if not log_path.exists():
+                print(f"Error: Path does not exist: {args.path}", file=sys.stderr)
                 return 1
 
-    # Read all lines
-    all_lines: list[str] = []
-    for log_file in log_files:
-        try:
-            content = log_file.read_text(errors="replace")
-            all_lines.extend(content.splitlines())
-        except Exception as e:
-            print(f"Warning: Error reading {log_file}: {e}", file=sys.stderr)
+            if log_path.is_file():
+                log_files = [log_path]
+            else:
+                log_files = list(log_path.glob("**/*.log")) + list(log_path.glob("**/*.txt"))
+                if not log_files:
+                    print(f"Error: No log files found in {args.path}", file=sys.stderr)
+                    return 1
+
+        # Read all lines
+        for log_file in log_files:
+            try:
+                content = log_file.read_text(errors="replace")
+                all_lines.extend(content.splitlines())
+            except Exception as e:
+                print(f"Warning: Error reading {log_file}: {e}", file=sys.stderr)
 
     if not all_lines:
         print("Error: No log content found", file=sys.stderr)
@@ -598,6 +612,10 @@ def _preprocess_args(argv: list[str]) -> list[str]:
 
     first = argv[0]
 
+    # A bare "-" means "read from stdin" — treat it like a path, not a flag.
+    if first == "-":
+        return ["analyze", *argv]
+
     # If first arg is a known subcommand or starts with -, don't modify
     if first in _KNOWN_COMMANDS or first.startswith("-"):
         return argv
@@ -655,7 +673,7 @@ def main() -> int:
     if args.command == "discover":
         from log_essence.discover import run_discover_command
 
-        return run_discover_command()
+        return run_discover_command(getattr(args, "path", None))
 
     if args.command == "ui":
         try:

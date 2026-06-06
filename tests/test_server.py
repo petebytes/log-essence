@@ -8,7 +8,9 @@ import pytest
 
 from log_essence.server import (
     LogEntry,
+    _format_sources_for_agent,
     detect_log_format,
+    discover_log_sources,
     extract_exception_type,
     extract_severity,
     extract_templates,
@@ -445,3 +447,78 @@ def test_search_logs_no_matches(tmp_path: Path) -> None:
 
     result = search_logs(path=str(log_file), query="anything")
     assert "No log content found" in result or "No matching" in result
+
+
+# --- Source discovery (MCP) ---
+
+
+def test_format_sources_for_agent_maps_types_to_mcp_tools() -> None:
+    """Discovered sources are rendered with the MCP tool an agent should call."""
+    sources = [
+        {
+            "type": "file",
+            "name": "/var/log/app.log",
+            "lines": 100,
+            "command": "log-essence /var/log/app.log",
+        },
+        {
+            "type": "docker",
+            "name": "web (nginx:latest)",
+            "lines": "?",
+            "command": "docker logs web 2>&1 | log-essence -",
+        },
+        {
+            "type": "journald",
+            "name": "system journal",
+            "lines": "?",
+            "command": "journalctl | log-essence -",
+        },
+    ]
+    result = _format_sources_for_agent(sources)
+    assert "/var/log/app.log" in result
+    assert "get_logs" in result  # file -> get_logs
+    assert "get_container_logs" in result  # docker -> get_container_logs
+    assert 'container="web"' in result  # image suffix stripped to bare name
+    assert "get_journald_logs" in result  # journald -> get_journald_logs
+
+
+def test_format_sources_for_agent_empty() -> None:
+    result = _format_sources_for_agent([])
+    assert "No log sources" in result
+
+
+def test_format_sources_for_agent_renders_commands_and_agent_docs() -> None:
+    """Run-commands (stdout capture) and agent-instruction files get their own guidance."""
+    sources = [
+        {
+            "type": "command",
+            "name": "dev (package.json)",
+            "lines": "stream",
+            "command": "pnpm run dev 2>&1 | log-essence -",
+        },
+        {
+            "type": "agent",
+            "name": "CLAUDE.md",
+            "lines": "-",
+            "command": "documents how to run/build/test",
+        },
+    ]
+    result = _format_sources_for_agent(sources)
+    assert "pnpm run dev 2>&1 | log-essence -" in result
+    assert "CLAUDE.md" in result
+
+
+def test_discover_log_sources_lists_local_files(tmp_path: Path, monkeypatch) -> None:
+    """The MCP tool surfaces local log files agents otherwise can't see."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "app.log").write_text("INFO line one\nERROR boom\n")
+    result = discover_log_sources()
+    assert isinstance(result, str)
+    assert "app.log" in result
+
+
+def test_discover_log_sources_accepts_path(tmp_path: Path) -> None:
+    """An agent can scope discovery to a specific project directory."""
+    (tmp_path / "svc.log").write_text("a\nb\n")
+    result = discover_log_sources(path=str(tmp_path))
+    assert "svc.log" in result

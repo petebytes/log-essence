@@ -1,5 +1,6 @@
 """Tests for the CLI module."""
 
+import io
 import json
 from pathlib import Path
 
@@ -33,6 +34,26 @@ def test_preprocess_args_with_flags() -> None:
     """Flags (starting with -) are not modified."""
     assert _preprocess_args(["--serve"]) == ["--serve"]
     assert _preprocess_args(["--version"]) == ["--version"]
+
+
+def test_parser_discover_with_path() -> None:
+    """`discover <path>` scopes discovery to another project without cd-ing."""
+    parser = create_parser()
+    args = parser.parse_args(["discover", "/some/project"])
+    assert args.command == "discover"
+    assert args.path == "/some/project"
+
+
+def test_parser_discover_no_path_defaults_none() -> None:
+    parser = create_parser()
+    args = parser.parse_args(["discover"])
+    assert getattr(args, "path", None) is None
+
+
+def test_preprocess_args_stdin_dash() -> None:
+    """A bare '-' means stdin and must route to analyze, not be read as a flag."""
+    assert _preprocess_args(["-"]) == ["analyze", "-"]
+    assert _preprocess_args(["-", "--severity", "ERROR"]) == ["analyze", "-", "--severity", "ERROR"]
 
 
 def test_preprocess_args_empty() -> None:
@@ -122,6 +143,32 @@ def test_run_analysis_invalid_since() -> None:
     args = parser.parse_args(["analyze", "/some/path", "--since", "invalid"])
     result = run_analysis(args)
     assert result == 1  # Error exit code
+
+
+def test_run_analysis_reads_stdin(monkeypatch, capsys) -> None:
+    """`log-essence -` reads log content from stdin (the form `discover` suggests)."""
+    parser = create_parser()
+    args = parser.parse_args(["analyze", "-"])
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(
+            "2025-01-01T10:00:00Z ERROR Connection failed\n"
+            "2025-01-01T10:00:01Z ERROR Connection failed\n"
+        ),
+    )
+    result = run_analysis(args)
+    assert result == 0
+    captured = capsys.readouterr()
+    assert "Log Analysis Summary" in captured.out
+
+
+def test_run_analysis_stdin_rejects_watch(monkeypatch) -> None:
+    """Watch mode needs a real file; stdin can't be re-read, so it must error."""
+    parser = create_parser()
+    args = parser.parse_args(["analyze", "-", "--watch"])
+    monkeypatch.setattr("sys.stdin", io.StringIO("INFO hello\n"))
+    result = run_analysis(args)
+    assert result == 1
 
 
 def test_run_analysis_success(tmp_path: Path) -> None:
