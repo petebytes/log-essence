@@ -3,7 +3,7 @@
 Auto-generated codebase orientation. Use this as a map to choose what to inspect; verify against source before editing.
 
 ## Freshness
-- Git: branch `feat/severity-weighted-budget`, commit `dc88868`, tracked working tree dirty at generation time.
+- Git: branch `feat/severity-weighted-budget`, commit `1cfbfcc`, tracked working tree dirty at generation time.
 - Symbol skeleton budget: ~2000 tokens after this header.
 
 ## Agent pre-work process
