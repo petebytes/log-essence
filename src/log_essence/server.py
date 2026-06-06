@@ -1370,6 +1370,86 @@ def list_containers() -> str:
     return "\n".join(lines)
 
 
+def _format_sources_for_agent(sources: list[dict]) -> str:
+    """Render discovered log sources as agent guidance: which tool to call for each."""
+    if not sources:
+        return (
+            "No log sources found for this project "
+            "(searched the project tree for log files, plus its Docker Compose stack). "
+            "Most code projects log to stdout — run the app and pipe it: "
+            "`<run-command> 2>&1 | log-essence -`."
+        )
+
+    by_type: dict[str, list[dict]] = defaultdict(list)
+    for s in sources:
+        by_type[s["type"]].append(s)
+
+    out: list[str] = [f"# Discovered log sources ({len(sources)})", ""]
+
+    if files := by_type.get("file"):
+        out.append("## Files — analyze with `get_logs`")
+        for s in files:
+            out.append(f'- {s["name"]} ({s["lines"]} lines) → get_logs(path="{s["name"]}")')
+        out.append("")
+
+    if commands := by_type.get("command"):
+        out.append("## Run the app to capture stdout logs (pipe into log-essence)")
+        for s in commands:
+            out.append(f"- {s['name']} → `{s['command']}`")
+        out.append("")
+
+    if agents := by_type.get("agent"):
+        out.append("## Project instructions — read for run/build/test commands")
+        for s in agents:
+            out.append(f"- {s['name']}")
+        out.append("")
+
+    if containers := by_type.get("docker"):
+        out.append("## Docker containers — analyze with `get_container_logs`")
+        for s in containers:
+            container = str(s["name"]).split(" (")[0]
+            out.append(f'- {s["name"]} → get_container_logs(container="{container}")')
+        out.append("")
+
+    if compose := by_type.get("compose"):
+        out.append("## Docker Compose — analyze with `get_docker_logs`")
+        for s in compose:
+            out.append(f'- {s["name"]} → get_docker_logs(path=".")')
+        out.append("")
+
+    if journald := by_type.get("journald"):
+        out.append("## systemd journal — analyze with `get_journald_logs`")
+        for s in journald:
+            out.append(f'- {s["name"]} → get_journald_logs(unit="<unit>.service", since="1h")')
+        out.append("")
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+@mcp.tool()
+def discover_log_sources(path: str | None = None) -> str:
+    """Discover log sources for a code project.
+
+    Project-scoped: scans the project tree (vendored/VCS/build dirs pruned) for log
+    files, plus the containers and Compose file belonging to that project's Docker
+    Compose stack. Does not surface machine-wide system logs or other projects'
+    containers. Call this first to find what's available, then call the suggested tool
+    for each source (get_logs / get_container_logs / get_docker_logs).
+
+    Args:
+        path: Project directory to scan (default: the server's current directory).
+
+    Returns:
+        A markdown list of discovered sources, each annotated with the tool to analyze it.
+    """
+    from pathlib import Path
+
+    from log_essence.discover import discover_sources
+
+    root = Path(path).expanduser() if path else None
+    return _format_sources_for_agent(discover_sources(root))
+
+
 def fetch_journald_logs(
     unit: str | None = None,
     priority: str | None = None,
