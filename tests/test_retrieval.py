@@ -102,3 +102,19 @@ def test_get_raw_logs_redacts_under_strict_mode(tmp_path: Path) -> None:
     raw = get_raw_logs(analysis_id=_analysis_id(summary))
     assert "user@acme.com" not in raw
     assert "10.0.0.5" not in raw
+
+
+def test_extract_templates_records_member_indices() -> None:
+    """Each template knows which input line indices belong to it (1 line -> 1 template)."""
+    from log_essence.server import detect_log_format, extract_templates
+
+    lines = ["ERROR boom alpha", "INFO ok", "ERROR boom beta", "INFO ok"]
+    fmt = detect_log_format(lines)
+    templates = extract_templates(lines, fmt)
+
+    # Every line index is covered exactly once across all templates.
+    covered = sorted(i for t in templates for i in t.member_indices)
+    assert covered == [0, 1, 2, 3]
+    # member_indices size matches the template's own count.
+    for t in templates:
+        assert len(t.member_indices) == t.count

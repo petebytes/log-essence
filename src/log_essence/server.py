@@ -246,6 +246,7 @@ class LogTemplate:
     examples: list[str] = field(default_factory=list)
     severity: str | None = None
     severity_counts: dict[str, int] = field(default_factory=dict)
+    member_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -640,6 +641,7 @@ def extract_templates(lines: list[str], log_format: str) -> list[LogTemplate]:
                 examples=examples,
                 severity=severity,
                 severity_counts=dict(severity_counts),
+                member_indices=member_idxs,
             )
         )
 
