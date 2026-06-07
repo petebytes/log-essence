@@ -1,6 +1,8 @@
 # F2 — Per-cluster retrieval (design)
 
-> Status: approved design, pre-implementation.
+> Status: approved design (revised after adversarial review), pre-implementation.
+> Scope: per-cluster retrieval for **all four** analysis tools — `get_logs`,
+> `get_docker_logs`, `get_container_logs`, `get_journald_logs` — see Scope.
 > Depends on PR #31 (redaction-bypass fix) — see Verification.
 > Date: 2026-06-07.
 
@@ -50,14 +52,23 @@ The roadmap/handoff notes were stale; these are the verified facts (post PR #31)
    summary. Each line maps to exactly one Drain template (`line_to_cluster` is
    1:1), so the per-cluster index sets partition the templated lines and each
    set's size equals that cluster's summed template counts.
-5. `get_logs` output names how to expand a cluster (discoverability).
+5. Every analysis tool's output carries the `analysis_id` and names how to
+   expand a cluster (discoverability).
 6. An out-of-range `cluster_id` returns an actionable error naming the valid range.
+7. **All four** tools that summarize via `analyze_log_lines` — `get_logs`,
+   `get_docker_logs`, `get_container_logs`, `get_journald_logs` — produce a
+   retrievable `analysis_id` and support `cluster_id` retrieval. (Today only
+   `get_logs` emits an `analysis_id` at all.)
 
 ## Decision
 
 - **Extend `get_raw_logs`** with an additive optional `cluster_id` param (chosen
   over a new `get_cluster_logs` tool — keeps the MCP surface small, per the C4
-  audit; backward-compatible).
+  audit). **Appended last** — `get_raw_logs(analysis_id, start_line=0,
+  max_lines=500, cluster_id=None)` — not inserted mid-signature, so the existing
+  positional order `(analysis_id, start_line, max_lines)` is preserved. (No
+  positional callers exist today — verified — but this avoids a future footgun
+  where `get_raw_logs(aid, 3)` is misread as a cluster selector.)
 - **Handle = the 1-based ordered cluster index** already visible to the agent.
 - **Store membership as indices, not ranges** (a cluster's lines are scattered).
   Carry the indices the code already computes; key the map by the same ordered
@@ -101,11 +112,34 @@ so `cluster_line_indices[N]` is exactly the lines of the cluster shown as
   leave the default `{}` — no clusters to retrieve.)
 - `tee_store(lines, source, cluster_line_indices=None)` stores it in the entry
   (default `None`/`{}` keeps the signature backward-compatible).
-- `get_logs` passes `result.cluster_line_indices` to `tee_store`, and appends a
-  hint after the `analysis_id` trailer, e.g.
-  `Expand one cluster: get_raw_logs(analysis_id, cluster_id=N).`
 
-### `get_raw_logs(analysis_id, cluster_id=None, start_line=0, max_lines=500)`
+### Shared retrieval trailer (`_store_and_annotate`) — used by all four tools
+One helper centralizes teeing + the trailer so the ordering is correct in
+exactly one place (and the four tools don't duplicate it):
+
+```
+def _store_and_annotate(result: AnalysisResult, source: str) -> str:
+    analysis_id = tee_store(result.analyzed_lines, source, result.cluster_line_indices)
+    return (
+        result.markdown
+        + "\n\n_Expand one cluster: get_raw_logs(analysis_id, cluster_id=N)._"
+        + f"\n\n_analysis_id: {analysis_id}_"
+    )
+```
+
+- The discoverability hint goes **before** the `_analysis_id: {id}_` trailer, so
+  the id stays the **final token** of the output.
+- `get_logs` (success path) returns `_store_and_annotate(result, path)` — this
+  replaces its current inline `tee_store` + trailer.
+- `get_docker_logs`, `get_container_logs`, `get_journald_logs` (success paths)
+  return `_store_and_annotate(analysis, source)` where `source` is that tool's
+  input identifier (container / unit / compose service). These three emit **no**
+  `analysis_id` today, so this is additive. Error/empty paths are unchanged.
+- Independently, the id parser is hardened: `_analysis_id()` (tests) extracts the
+  12-hex token by **regex** (`_analysis_id: ([0-9a-f]{12})_`), not by assuming it
+  is the trailing token — so trailing helper text can never cause a cache miss.
+
+### `get_raw_logs(analysis_id, start_line=0, max_lines=500, cluster_id=None)`
 - `cluster_id is None` → current global path (unchanged, incl. the `start_line`
   clamp from PR #31).
 - `cluster_id` set:
@@ -118,21 +152,30 @@ so `cluster_line_indices[N]` is exactly the lines of the cluster shown as
 
 ## Scope
 
-**In:** per-cluster retrieval through `get_logs` → `get_raw_logs`; the membership
-plumbing; the discoverability hint; README update; tests.
+**In:** per-cluster retrieval via `get_raw_logs(cluster_id=N)`; the membership
+plumbing in `analyze_log_lines`; the shared `_store_and_annotate` trailer wired
+into **all four** analysis tools (`get_logs`, `get_docker_logs`,
+`get_container_logs`, `get_journald_logs`) — closing the gap that three of them
+emit no `analysis_id` at all today; README update; tests.
 
 **Out (explicitly):**
-- The docker/container log tools (`get_docker_logs`, `get_container_logs`) — they
-  call `analyze_log_lines` but do **not** `tee_store`, so they have no retrieval
-  path today. Adding one is a separate item.
 - C5 compression eval/benchmark harness — pairs with F2 to guard fidelity but is
   its own chore; not bundled here.
 - F3/F4/F5.
+- `search_logs` (`server.py:1846`) and `get_error_chain` (`:1729`) — they do not
+  summarize via `analyze_log_lines` (verified — not in its caller set), so the
+  cluster handle does not apply to them.
 
 ## Blast radius
 
-- `get_raw_logs` contract: **additive** `cluster_id` param (backward-compatible).
-- `get_logs` output: one new hint line.
+- `get_raw_logs` contract: **additive** `cluster_id` param (appended last;
+  backward-compatible).
+- Output change for all four analysis tools: each success path gains a hint line
+  + `analysis_id` trailer via the shared helper. `get_logs` already had a trailer;
+  `get_docker_logs`/`get_container_logs`/`get_journald_logs` gain one (additive —
+  they returned bare markdown before). Their existing tests are thin and mostly
+  hit error/mocked paths (verified), so low regression risk; TDD catches any
+  exact-output assertions.
 - `tee_store`: additive optional param.
 - `AnalysisResult`, `LogTemplate`: additive internal fields.
 - Cache is in-memory, process-local, TTL 1h — **no persistence/migration**.
@@ -166,18 +209,28 @@ In `tests/test_retrieval.py` (the file PR #31 introduced):
    redacted (guards against a future regression of the PR #31 fix).
 8. **Coverage invariant:** union of every cluster's retrieved lines ⊆ the global
    `get_raw_logs` output.
+9. **Id extraction is position-independent:** the `analysis_id` is still
+   extractable (and a round-trip `get_raw_logs` succeeds) when the `get_logs`
+   output carries the new cluster hint — guards against the trailing-text /
+   cache-miss failure mode.
+10. **All four tools are retrievable:** `get_docker_logs` / `get_container_logs` /
+    `get_journald_logs` (with their underlying fetch mocked to return sample
+    lines) each emit an `analysis_id`, and a `cluster_id` round-trip returns that
+    source's redacted cluster lines — same shared path as `get_logs`.
 
 ## Implementation touch-points
 
 - `src/log_essence/server.py`
   - `LogTemplate` dataclass — add `member_indices`.
   - `extract_templates` — store `member_idxs` on the template.
-  - `analyze_log_lines` — build `cluster_line_indices`; set on result; pass to
-    `tee_store`.
+  - `analyze_log_lines` — build `cluster_line_indices`; set on result.
   - `tee_store` — accept + store the map.
-  - `get_logs` — pass the map; add the discoverability hint.
-  - `get_raw_logs` — add `cluster_id`; per-cluster branch + error.
+  - `_store_and_annotate` — **new** shared helper (tee + hint + id trailer).
+  - `get_logs` — return via `_store_and_annotate` (replaces inline tee+trailer).
+  - `get_docker_logs`, `get_container_logs`, `get_journald_logs` — route their
+    success-path return through `_store_and_annotate`.
+  - `get_raw_logs` — add `cluster_id` (last param); per-cluster branch + error.
 - `src/log_essence/ui/models.py`
   - `AnalysisResult.cluster_line_indices` internal field.
-- `tests/test_retrieval.py` — the 8 tests above.
-- `README.md` — document `cluster_id`.
+- `tests/test_retrieval.py` — the 10 tests above; harden `_analysis_id()` to regex.
+- `README.md` — document `cluster_id` retrieval.
