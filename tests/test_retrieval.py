@@ -76,6 +76,23 @@ def test_get_raw_logs_redacted_when_no_templates(tmp_path: Path) -> None:
     assert "[EMAIL:" in raw
 
 
+def test_get_raw_logs_clamps_out_of_range_start(tmp_path: Path) -> None:
+    """Negative/past-the-end start_line is clamped, not a tail slice or garbled header."""
+    log_file = tmp_path / "app.log"
+    log_file.write_text("\n".join(f"line {i}" for i in range(5)) + "\n")
+    aid = _analysis_id(get_logs(path=str(log_file), redact=False))
+
+    # Negative start must read from the top, never negative-index into the tail.
+    neg = get_raw_logs(analysis_id=aid, start_line=-1, max_lines=2)
+    assert "line 0" in neg
+    assert "Lines 1-2 of 5" in neg
+
+    # Past-the-end start yields a clear empty-range message, not "Lines 100-99 of 5".
+    past = get_raw_logs(analysis_id=aid, start_line=99)
+    assert "no lines in range" in past.lower()
+    assert "Lines 100-99" not in past
+
+
 def test_get_raw_logs_redacts_under_strict_mode(tmp_path: Path) -> None:
     """Strict mode's redaction is reflected in retrieved lines, not just the summary."""
     log_file = tmp_path / "app.log"

@@ -2002,10 +2002,18 @@ def get_raw_logs(
             "Re-run the analysis to generate a new cache."
         )
 
-    lines = entry["lines"][start_line : start_line + max_lines]
     total = entry["line_count"]
-    end = start_line + len(lines)
-    header = f"Source: {entry['source']} | Lines {start_line + 1}-{end} of {total}\n\n"
+    # Clamp into [0, total] so a negative offset never tail-slices and an
+    # over-range offset never yields a backwards "Lines 100-99" header.
+    start = max(0, min(start_line, total))
+    lines = entry["lines"][start : start + max_lines]
+    if not lines:
+        return (
+            f"Source: {entry['source']} | "
+            f"No lines in range (start_line={start_line}, total={total})"
+        )
+    end = start + len(lines)
+    header = f"Source: {entry['source']} | Lines {start + 1}-{end} of {total}\n\n"
     return header + "\n".join(lines)
 
 
