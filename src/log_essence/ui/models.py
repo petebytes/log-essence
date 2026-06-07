@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SkipValidation, field_validator
 
 from log_essence import __version__
 
@@ -43,6 +43,12 @@ class AnalysisResult(BaseModel):
     )
     clusters_data: list[ClusterOutput] | None = Field(
         default=None, description="Cluster data for JSON output"
+    )
+    # Internal: the lines exactly as analyzed (post-redaction). Cached for raw
+    # retrieval so get_raw_logs returns redacted content, not the original input.
+    # Excluded from serialization; SkipValidation avoids per-line cost on big logs.
+    analyzed_lines: SkipValidation[list[str]] = Field(
+        default_factory=list, exclude=True, repr=False
     )
 
 

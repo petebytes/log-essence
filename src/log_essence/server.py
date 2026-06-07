@@ -987,6 +987,7 @@ def analyze_log_lines(
                 original_tokens=original_tokens,
                 output_tokens=count_tokens(markdown),
             ),
+            analyzed_lines=all_lines,
         )
 
     # Cluster semantically
@@ -1041,6 +1042,7 @@ def analyze_log_lines(
         lines_processed=len(all_lines),
         severity_distribution=dict(severity_distribution),
         clusters_data=clusters_data,
+        analyzed_lines=all_lines,
     )
 
 
@@ -1124,8 +1126,9 @@ def get_logs(
 
     result = analyze_log_lines(all_lines, token_budget, num_clusters, severity_filter, redact)
 
-    # Store in tee cache for later retrieval via get_raw_logs
-    analysis_id = tee_store(all_lines, path)
+    # Cache the lines as analyzed (redacted per `redact`) so get_raw_logs returns
+    # redacted content for retrieval — never the original, un-redacted input.
+    analysis_id = tee_store(result.analyzed_lines, path)
 
     return result.markdown + f"\n\n_analysis_id: {analysis_id}_"
 
@@ -1978,7 +1981,9 @@ def get_raw_logs(
     """Retrieve raw (redacted) log lines from a previous analysis.
 
     After reviewing a log analysis summary, use this tool to get the full
-    log content for deeper investigation. Lines are already redacted.
+    log content for deeper investigation. Lines carry the same redaction
+    applied during analysis (redacted by default; raw only if that analysis
+    was run with redact=False).
 
     Args:
         analysis_id: The analysis ID returned from a previous get_logs call.
