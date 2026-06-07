@@ -761,6 +761,11 @@ def _order_clusters(clusters: list[SemanticCluster]) -> list[SemanticCluster]:
     )
 
 
+def _templates_by_priority(templates: list[LogTemplate]) -> list[LogTemplate]:
+    """Sort templates by severity (highest first), then frequency."""
+    return sorted(templates, key=lambda t: (_severity_rank(t.severity), t.count), reverse=True)
+
+
 def format_as_markdown(
     clusters: list[SemanticCluster],
     log_format: str,
@@ -825,15 +830,15 @@ def format_as_markdown(
         cluster_section += f"**Occurrences:** {cluster.total_count:,} | "
         cluster_section += f"**Patterns:** {len(cluster.templates)}\n\n"
 
-        # Add top templates
-        top_templates = sorted(cluster.templates, key=lambda t: t.count, reverse=True)[:5]
+        # Add top templates (highest severity first, then frequency)
+        top_templates = _templates_by_priority(cluster.templates)[:5]
         for template in top_templates:
             severity_badge = f"[{template.severity}] " if template.severity else ""
             cluster_section += f"- {severity_badge}`{template.template}` ({template.count:,}x)\n"
 
-        # Add example
-        if cluster.templates[0].examples:
-            example_text = cluster.templates[0].examples[0][:500]
+        # Add example from the highest-severity template
+        if top_templates and top_templates[0].examples:
+            example_text = top_templates[0].examples[0][:500]
             cluster_section += f"\n**Example:**\n```\n{example_text}\n```\n\n"
 
         cluster_section += "---\n\n"
@@ -884,14 +889,14 @@ def _format_compact(
         summary_text = cluster.summary[:60]
         cluster_lines = [f"[{i}] {summary_text} (n={cluster.total_count:,})"]
 
-        top_templates = sorted(cluster.templates, key=lambda t: t.count, reverse=True)[:3]
+        top_templates = _templates_by_priority(cluster.templates)[:3]
         for template in top_templates:
             sev = f"{template.severity} " if template.severity else ""
             cluster_lines.append(f"  {sev}{template.template} ({template.count}x)")
 
-        # Only first example, truncated
-        if cluster.templates[0].examples:
-            example_text = cluster.templates[0].examples[0][:200]
+        # Only first example (from the highest-severity template), truncated
+        if top_templates and top_templates[0].examples:
+            example_text = top_templates[0].examples[0][:200]
             cluster_lines.append(f"  ex: {example_text}")
 
         section = "\n".join(cluster_lines) + "\n"

@@ -225,6 +225,52 @@ def test_log_patterns_heading_is_severity() -> None:
     assert "## Log Patterns by Frequency" not in result.markdown
 
 
+def test_templates_by_priority_orders_severity_then_count() -> None:
+    from log_essence.server import LogTemplate, _templates_by_priority
+
+    ts = [
+        LogTemplate("a", 1, 100, severity="INFO", severity_counts={"INFO": 100}),
+        LogTemplate("b", 2, 1, severity="ERROR", severity_counts={"ERROR": 1}),
+        LogTemplate("c", 3, 50, severity="INFO", severity_counts={"INFO": 50}),
+    ]
+    assert [t.template for t in _templates_by_priority(ts)] == ["b", "a", "c"]
+
+
+def test_mixed_cluster_surfaces_error_template_and_example() -> None:
+    from log_essence.server import LogTemplate, SemanticCluster, format_as_markdown
+
+    templates = [
+        LogTemplate(
+            f"info event {i}",
+            i,
+            100,
+            examples=[f"2025-01-01 INFO info event {i}"],
+            severity="INFO",
+            severity_counts={"INFO": 100},
+        )
+        for i in range(6)
+    ]
+    templates.append(
+        LogTemplate(
+            "disk corruption detected",
+            99,
+            1,
+            examples=["2025-01-01 ERROR disk corruption detected"],
+            severity="ERROR",
+            severity_counts={"ERROR": 1},
+        )
+    )
+    cluster = SemanticCluster(
+        templates=templates, centroid_idx=0, total_count=601, summary="info event 0"
+    )
+
+    md = format_as_markdown([cluster], "docker", 601, token_budget=8000)
+    assert "disk corruption detected" in md  # ERROR template shown despite low count
+
+    compact = format_as_markdown([cluster], "docker", 601, token_budget=8000, compact=True)
+    assert "disk corruption detected" in compact
+
+
 def test_get_logs_file_not_found() -> None:
     result = get_logs(path="/nonexistent/path.log")
     assert "Error: Path does not exist" in result
