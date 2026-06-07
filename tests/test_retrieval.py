@@ -152,3 +152,43 @@ def test_tee_store_defaults_cluster_line_indices_to_empty() -> None:
 
     aid = tee_store(["a"], "src")
     assert _tee_cache[aid]["cluster_line_indices"] == {}
+
+
+def test_get_raw_logs_cluster_id_returns_only_that_cluster() -> None:
+    from log_essence.server import get_raw_logs, tee_store
+
+    aid = tee_store(
+        ["err one", "info one", "err two", "info two"],
+        "src",
+        {1: [0, 2], 2: [1, 3]},
+    )
+    out = get_raw_logs(analysis_id=aid, cluster_id=1)
+    assert "err one" in out and "err two" in out
+    assert "info one" not in out and "info two" not in out
+    assert "Cluster 1" in out
+    assert "of 2" in out  # cluster 1 has 2 lines
+
+
+def test_get_raw_logs_cluster_id_out_of_range() -> None:
+    from log_essence.server import get_raw_logs, tee_store
+
+    aid = tee_store(["a"], "src", {1: [0]})
+    out = get_raw_logs(analysis_id=aid, cluster_id=9)
+    assert "not found" in out.lower()
+    assert "1 cluster" in out  # names the available count
+    # cluster_id is 1-based: 0 and negatives are out of range too
+    assert "not found" in get_raw_logs(analysis_id=aid, cluster_id=0).lower()
+    # an analysis with no clusters reports zero (no "(1-0)" range noise)
+    empty = tee_store(["x"], "src", {})
+    zero = get_raw_logs(analysis_id=empty, cluster_id=1)
+    assert "0 clusters" in zero and "(1-" not in zero
+
+
+def test_get_raw_logs_cluster_id_within_cluster_pagination() -> None:
+    from log_essence.server import get_raw_logs, tee_store
+
+    aid = tee_store(["e0", "e1", "e2", "e3", "skip"], "src", {1: [0, 1, 2, 3]})
+    out = get_raw_logs(analysis_id=aid, cluster_id=1, start_line=1, max_lines=2)
+    assert "e1" in out and "e2" in out
+    assert "e0" not in out and "e3" not in out
+    assert "Lines 2-3 of 4" in out

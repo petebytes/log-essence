@@ -1991,6 +1991,7 @@ def get_raw_logs(
     analysis_id: str,
     start_line: int = 0,
     max_lines: int = 500,
+    cluster_id: int | None = None,
 ) -> str:
     """Retrieve raw (redacted) log lines from a previous analysis.
 
@@ -2003,9 +2004,11 @@ def get_raw_logs(
         analysis_id: The analysis ID returned from a previous get_logs call.
         start_line: Line offset to start from (default: 0).
         max_lines: Maximum lines to return (default: 500).
+        cluster_id: If set, return only the lines of that cluster (the 1-based
+            "Cluster N" shown in the summary). Default None returns all lines.
 
     Returns:
-        Raw log lines from the cached analysis.
+        Raw log lines from the cached analysis (whole analysis, or one cluster).
     """
     with _tee_lock:
         entry = _tee_cache.get(analysis_id)
@@ -2016,18 +2019,34 @@ def get_raw_logs(
             "Re-run the analysis to generate a new cache."
         )
 
-    total = entry["line_count"]
+    if cluster_id is not None:
+        index_map = entry.get("cluster_line_indices") or {}
+        if cluster_id not in index_map:
+            n = len(index_map)
+            rng = f" (1-{n})" if n else ""
+            return (
+                f"Error: cluster_id {cluster_id} not found; "
+                f"analysis has {n} cluster{'s' if n != 1 else ''}{rng}."
+            )
+        source_lines = [entry["lines"][i] for i in index_map[cluster_id]]
+        total = len(source_lines)
+        label = f"Cluster {cluster_id} | "
+    else:
+        source_lines = entry["lines"]
+        total = entry["line_count"]
+        label = ""
+
     # Clamp into [0, total] so a negative offset never tail-slices and an
     # over-range offset never yields a backwards "Lines 100-99" header.
     start = max(0, min(start_line, total))
-    lines = entry["lines"][start : start + max_lines]
+    lines = source_lines[start : start + max_lines]
     if not lines:
         return (
             f"Source: {entry['source']} | "
             f"No lines in range (start_line={start_line}, total={total})"
         )
     end = start + len(lines)
-    header = f"Source: {entry['source']} | Lines {start + 1}-{end} of {total}\n\n"
+    header = f"Source: {entry['source']} | {label}Lines {start + 1}-{end} of {total}\n\n"
     return header + "\n".join(lines)
 
 
