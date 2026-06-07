@@ -560,32 +560,42 @@ git commit -m "feat: shared retrieval trailer + cluster hint for get_logs"
 from unittest.mock import patch  # add with the other imports at top of file
 
 
-def test_get_container_logs_supports_cluster_retrieval() -> None:
-    from log_essence.server import get_container_logs, get_raw_logs
+def _error_cluster_body(aid: str, marker: str = "boom") -> str:
+    """Body of the cluster whose lines contain `marker` (exercises cluster_id)."""
+    for cid in (1, 2):
+        body = get_raw_logs(analysis_id=aid, cluster_id=cid)
+        if marker in body:
+            return body
+    raise AssertionError(f"no cluster contained {marker!r}")
 
-    sample = "\n".join(["ERROR boom user@acme.com"] * 2 + ["INFO ok"] * 5)
+
+def test_get_container_logs_supports_cluster_retrieval() -> None:
+    from log_essence.server import get_container_logs
+
+    sample = "\n".join(["ERROR boom user@acme.com"] * 2 + ["INFO heartbeat ok"] * 5)
     with patch("log_essence.server.fetch_container_logs", return_value=sample):
         out = get_container_logs(container="web")
     assert "cluster_id=N" in out
-    raw = get_raw_logs(analysis_id=_analysis_id(out))
-    assert "user@acme.com" not in raw  # redacted by default
-    assert "[EMAIL:" in raw
+    body = _error_cluster_body(_analysis_id(out))  # real cluster_id round-trip
+    assert "boom" in body and "heartbeat" not in body  # per-cluster isolation
+    assert "user@acme.com" not in body and "[EMAIL:" in body  # redacted per-cluster
 
 
 def test_get_journald_logs_supports_cluster_retrieval() -> None:
-    from log_essence.server import get_journald_logs, get_raw_logs
+    from log_essence.server import get_journald_logs
 
-    sample = "\n".join(["ERROR boom"] * 2 + ["INFO ok"] * 5)
+    sample = "\n".join(["ERROR boom"] * 2 + ["INFO heartbeat ok"] * 5)
     with patch("log_essence.server.fetch_journald_logs", return_value=sample):
         out = get_journald_logs(unit="nginx")
     assert "_analysis_id:" in out and "cluster_id=N" in out
-    assert "Lines 1-" in get_raw_logs(analysis_id=_analysis_id(out))
+    body = _error_cluster_body(_analysis_id(out))
+    assert "boom" in body and "heartbeat" not in body
 
 
 def test_get_docker_logs_supports_cluster_retrieval(tmp_path: Path) -> None:
-    from log_essence.server import get_docker_logs, get_raw_logs
+    from log_essence.server import get_docker_logs
 
-    sample = "\n".join(["ERROR boom"] * 2 + ["INFO ok"] * 5)
+    sample = "\n".join(["ERROR boom"] * 2 + ["INFO heartbeat ok"] * 5)
     with (
         patch("log_essence.server.discover_compose_file", return_value=tmp_path / "docker-compose.yml"),
         patch("log_essence.server.get_compose_services", return_value=[{"name": "web"}]),
@@ -593,7 +603,8 @@ def test_get_docker_logs_supports_cluster_retrieval(tmp_path: Path) -> None:
     ):
         out = get_docker_logs(path=str(tmp_path))
     assert "_analysis_id:" in out and "cluster_id=N" in out
-    assert "Lines 1-" in get_raw_logs(analysis_id=_analysis_id(out))
+    body = _error_cluster_body(_analysis_id(out))
+    assert "boom" in body and "heartbeat" not in body
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
