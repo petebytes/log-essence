@@ -104,6 +104,24 @@ def test_get_raw_logs_redacts_under_strict_mode(tmp_path: Path) -> None:
     assert "10.0.0.5" not in raw
 
 
+def test_analyze_log_lines_cluster_line_indices_match_clusters() -> None:
+    """cluster_line_indices is keyed by the same 1-based id as clusters_data, and
+    each id's index set has the cluster's 'Occurrences' size."""
+    from log_essence.server import analyze_log_lines
+
+    lines = ["ERROR boom"] * 3 + ["INFO heartbeat ok"] * 5
+    result = analyze_log_lines(lines, redact=False)
+
+    assert result.clusters_data is not None
+    cluster_ids = {c.id for c in result.clusters_data}
+    assert set(result.cluster_line_indices) == cluster_ids
+
+    for c in result.clusters_data:
+        idxs = result.cluster_line_indices[c.id]
+        assert len(idxs) == c.total_count
+        assert idxs == sorted(idxs)  # original file order
+
+
 def test_extract_templates_records_member_indices() -> None:
     """Each template knows which input line indices belong to it (1 line -> 1 template)."""
     from log_essence.server import detect_log_format, extract_templates

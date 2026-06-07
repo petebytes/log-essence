@@ -1032,6 +1032,11 @@ def analyze_log_lines(
         for i, cluster in enumerate(clusters, 1)
     ]
 
+    cluster_line_indices = {
+        i: sorted(idx for t in cluster.templates for idx in t.member_indices)
+        for i, cluster in enumerate(clusters, 1)
+    }
+
     return AnalysisResult(
         markdown=markdown,
         stats=AnalysisStats(
@@ -1045,6 +1050,7 @@ def analyze_log_lines(
         severity_distribution=dict(severity_distribution),
         clusters_data=clusters_data,
         analyzed_lines=all_lines,
+        cluster_line_indices=cluster_line_indices,
     )
 
 

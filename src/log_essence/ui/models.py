@@ -50,6 +50,12 @@ class AnalysisResult(BaseModel):
     analyzed_lines: SkipValidation[list[str]] = Field(
         default_factory=list, exclude=True, repr=False
     )
+    # Internal: 1-based cluster id -> sorted line indices into analyzed_lines.
+    # Keyed by the same ordered index as clusters_data / "Cluster N". Excluded
+    # from serialization; SkipValidation avoids per-entry cost on big logs.
+    cluster_line_indices: SkipValidation[dict[int, list[int]]] = Field(
+        default_factory=dict, exclude=True, repr=False
+    )
 
 
 class UIConfig(BaseModel):
