@@ -319,7 +319,7 @@ Error processing payment for [EMAIL:a7f2] card [CC:16:d4e8]
 
 ---
 
-## Log Patterns by Frequency
+## Log Patterns by Severity
 
 ### Cluster 1: Database Operations
 

@@ -299,6 +299,66 @@ def test_cluster_output_includes_high_severity_template() -> None:
     assert any("critical subsystem failure" in t for t in out_templates)
 
 
+# Structurally distinct messages -> distinct Drain templates -> many clusters.
+# (Numbered messages would collapse to one "<*>" template and never truncate.)
+_DISTINCT_MSGS = [
+    "user authenticated successfully",
+    "cache entry written to disk",
+    "configuration file parsed",
+    "database pool initialized",
+    "scheduled task dispatched",
+    "metrics exported to sink",
+    "session created for client",
+    "feature flag evaluated",
+    "background worker started",
+    "health endpoint queried",
+    "queue message acknowledged",
+    "snapshot committed to store",
+    "template rendered for view",
+    "webhook delivered downstream",
+]
+
+
+def test_e2e_json_error_survives_small_budget() -> None:
+    info: list[str] = []
+    for m in _DISTINCT_MSGS:
+        info += [f'{{"level":"info","message":"{m}"}}'] * 40
+    err = ['{"level":"error","message":"upstream connection refused"}']
+    result = analyze_log_lines(info + err, token_budget=400, num_clusters=10, redact=False)
+    md = result.markdown
+    assert "upstream connection refused" in md  # ERROR survived truncation
+    assert "omitted" in md  # truncation actually happened
+
+
+def test_e2e_compact_error_survives_small_budget() -> None:
+    info: list[str] = []
+    for m in _DISTINCT_MSGS:
+        info += [f"2025-01-01 INFO {m}"] * 40
+    err = ["2025-01-01 ERROR upstream connection refused"]
+    result = analyze_log_lines(
+        info + err, token_budget=200, num_clusters=10, redact=False, compact=True
+    )
+    assert "upstream connection refused" in result.markdown
+    assert "omitted" in result.markdown
+
+
+def test_e2e_json_fatal_alias_ranks_first() -> None:
+    info = ['{"level":"info","message":"steady state"}'] * 300
+    fatal = ['{"level":"fatal","message":"kernel oops"}']
+    result = analyze_log_lines(info + fatal, token_budget=8000, num_clusters=10, redact=False)
+    md = result.markdown
+    assert md.index("kernel oops") < md.index("steady state")
+    assert result.severity_distribution.get("CRITICAL") == 1  # fatal -> CRITICAL
+
+
+def test_e2e_json_collapsed_error_is_visible() -> None:
+    lines = ['{"level":"info","message":"request handled"}'] * 200
+    lines.append('{"level":"error","message":"request handled"}')
+    result = analyze_log_lines(lines, token_budget=8000, num_clusters=10, redact=False)
+    assert "[ERROR]" in result.markdown  # badge reflects the highest present
+    assert result.severity_distribution == {"INFO": 200, "ERROR": 1}
+
+
 def test_get_logs_file_not_found() -> None:
     result = get_logs(path="/nonexistent/path.log")
     assert "Error: Path does not exist" in result
