@@ -1,15 +1,17 @@
 # F1 — Severity-weighted budget allocation (design)
 
-- **Status:** approved (design v2), pending implementation
+- **Status:** approved (design v3), pending implementation
 - **Date:** 2026-06-06
 - **Roadmap ID:** F1 (`P0`) — see `ROADMAP.md`
 - **Sizing:** Churn **M** · Sites many · Files 2 (`server.py`, `tests/`) · Horizon medium ·
   Verify test (unit + end-to-end) · slightly **messy** (Drain/severity edge cases)
 
-> **v2 supersedes the formatter-only v1.** A code review (verified empirically, below)
-> showed the severity signal is degraded **before** the formatter runs, so reordering
-> clusters alone does not satisfy the acceptance criterion on real logs — JSON logs in
-> particular. The fix reaches into severity extraction, which raises the size from S to M.
+> **v3 supersedes v2.** v2 corrected v1's formatter-only blind spot (severity is degraded
+> *before* the formatter). v3 corrects v2's *ordering-location* blind spot: ordering only
+> inside `format_as_markdown` left `clusters_data` (CLI `--format json`, UI "Save JSON") in
+> frequency order, so outputs disagreed. v3 orders clusters **once** in `analyze_log_lines`
+> so every output agrees, and normalizes the **second** severity-filter consumer
+> (`search_logs`). Both were caught by an adversarial review of the plan (verified below).
 
 ## Problem
 
@@ -39,41 +41,55 @@ already be gone or mislabeled:
 
 ## Verification — code review findings (all confirmed empirically)
 
-Reproduced against the real functions (`tmp/f1_repro.py`, gitignored):
+**Round 1 — reproduced against real functions (`tmp/f1_repro.py`, gitignored):**
 
 | # | Sev | Claim | Evidence |
 |---|-----|-------|----------|
 | 1 | CRITICAL | Same-shape JSON `100 INFO + 1 ERROR` collapses to one template | `extract_templates` → **1 template, count=101, severity=INFO**; e2e markdown mentions "ERROR" → **False** |
-| 2 | HIGH | JSON severity returns raw aliases below the rank table | `extract_severity` JSON → `FATAL`/`WARN`/`ERR`/`TRACE` (rank 0); regex path correctly maps the same to CRITICAL/WARNING/ERROR/DEBUG |
-| 3 | HIGH | Mixed cluster floats by max severity but hides the ERROR | 6 INFO templates (count 100) + 1 ERROR template (count 1) → ERROR template **not** in rendered body (top-5 by count); example is INFO |
-| 4 | MEDIUM | Manual-cluster unit test passes while e2e fails | Proposed v1 test builds `SemanticCluster`s directly, bypassing `extract_templates`/JSON extraction where #1/#2 live |
+| 2 | HIGH | JSON severity returns raw aliases below the rank table | `extract_severity` JSON → `FATAL`/`WARN`/`ERR`/`TRACE` (rank 0); regex path maps the same to CRITICAL/WARNING/ERROR/DEBUG |
+| 3 | HIGH | Mixed cluster floats by max severity but hides the ERROR | 6 INFO templates (count 100) + 1 ERROR template (count 1) → ERROR template **not** in rendered body; example is INFO |
+| 4 | MEDIUM | Manual-cluster unit test passes while e2e fails | A unit test building `SemanticCluster`s directly bypasses `extract_templates` where #1/#2 live |
 
-Clean checks confirmed: no schema/migration (analytics SQLite is stats-only),
-`_format_compact` is single-caller (`server.py:702`), no persisted-state hazard.
+**Round 2 — review of the plan, verified against the code:**
+
+| # | Sev | Claim | Evidence |
+|---|-----|-------|----------|
+| 5 | HIGH | Ordering only in `format_as_markdown` leaves `clusters_data` in frequency order | `format_as_markdown` has one caller (`server.py:908`); `clusters_data` built separately and surfaced by CLI (`cli.py:452`) + UI (`ui/app.py:169`) — markdown shows ERROR first, JSON shows INFO first |
+| 6 | HIGH | `search_logs` severity filter still compares raw `{s.upper()}` | `server.py:1790` `{s.upper()}` vs normalized `extract_severity` → `severity_filter=["err"]` silently returns nothing after alias normalization |
+| 7 | HIGH | "Commit per task" leaves regressed intermediate commits; repo pushes at session end | `AGENTS.md:17` requires `git push` to finish; Task 1 regresses alias filters and Task 2 breaks distribution until a later task |
+
+Clean checks confirmed both rounds: analytics SQLite is stats-only (no migration);
+`severity_counts` uses `default_factory=dict` (no constructor breakage); `tee_store`
+hash inputs untouched; `_format_compact` is single-caller.
 
 ## Goal / acceptance criteria
 
-A high-severity cluster **survives truncation** at a small `token_budget`, **and the
-rendered output makes the high-severity content visible** (badge + example). Holds at
-any volume ratio and across formats:
+A high-severity cluster **survives truncation** at a small `token_budget`, the rendered
+output makes its high-severity content **visible** (badge + example), and **all outputs
+agree** (markdown, CLI JSON, UI). Holds at any volume ratio and across formats:
 
 1. Plaintext/Docker: INFO-dominated log with one ERROR cluster → ERROR survives.
 2. **JSON same-shape:** `100 {"level":"info"} + 1 {"level":"error"}` (identical message)
-   → the collapsed cluster ranks high and the output shows ERROR (badge/example), not
-   just INFO.
+   → the collapsed cluster ranks high and the output shows ERROR (badge/example).
 3. **JSON aliases:** a `{"level":"fatal"}` cluster ranks at the top, never below DEBUG.
-4. Both `compact=False` and `compact=True`.
+4. **Cross-output consistency:** `clusters_data[0]` (CLI/UI JSON) is the same
+   high-severity cluster shown first in the markdown.
+5. **Filter parity:** alias filters (`err`/`warn`/`fatal`/`trace`) work on JSON for both
+   `analyze_log_lines` (and its MCP wrappers) and `search_logs`.
+6. Both `compact=False` and `compact=True`.
 
-## Decision — tiered ordering + upstream severity integrity
+## Decision — tiered ordering + upstream severity integrity + one ordering source
 
-**Ordering (unchanged from v1):** sort clusters by `(highest severity rank in the
-cluster, total_count)`, both descending — severity primary, frequency tiebreak. The
-only option that *guarantees* the criterion at any ratio. (Rejected: weighted blend
-`Σ weight×count` fails at `1M INFO : 10 ERROR`; dampened `Σ weight×log1p(count)` only
-holds probabilistically. Both verified against the criterion.)
+**Ordering:** sort clusters by `(highest severity rank in the cluster, total_count)`,
+both descending — severity primary, frequency tiebreak. The only option that *guarantees*
+the criterion at any ratio. (Rejected: weighted blend `Σ weight×count` fails at
+`1M INFO : 10 ERROR`; dampened `Σ weight×log1p(count)` holds only probabilistically.)
 
-**Severity integrity (new in v2):** preserve and normalize severity through extraction
-so the ordering has a correct signal to act on, and surface it in the rendered body.
+**Severity integrity:** preserve and normalize severity through extraction so ordering
+has a correct signal, and surface it in the rendered body.
+
+**One ordering source:** apply the ordering **once** in `analyze_log_lines`, before both
+`format_as_markdown` and `clusters_data`, so markdown / CLI JSON / UI never diverge.
 
 ## Design details
 
@@ -95,10 +111,7 @@ SEVERITY_ALIASES = {
 }
 ```
 
-Hardcoded by intent (YAGNI): no caller wants tunable weights; constants are testable and
-trivially promoted later.
-
-### Helpers (`server.py`, near the formatters)
+### Helpers (`server.py`)
 
 ```python
 def _normalize_severity(raw: str | None) -> str | None:
@@ -112,150 +125,109 @@ def _severity_rank(sev: str | None) -> int:
 
 def _cluster_severity_rank(cluster: SemanticCluster) -> int:
     return max((_severity_rank(t.severity) for t in cluster.templates), default=0)
+
+def _order_clusters(clusters: list[SemanticCluster]) -> list[SemanticCluster]:
+    return sorted(clusters, key=lambda c: (_cluster_severity_rank(c), c.total_count), reverse=True)
+
+def _templates_by_priority(templates: list[LogTemplate]) -> list[LogTemplate]:
+    return sorted(templates, key=lambda t: (_severity_rank(t.severity), t.count), reverse=True)
 ```
 
-### Finding 2 — normalize at extraction
+### Finding 2/6 — normalize at extraction and at every filter input
 
-`extract_severity` (`server.py:483`): route both paths through `_normalize_severity`.
-JSON branch: `return _normalize_severity(str(data[field]))` (was `.upper()`). The regex
-branch already emits canonical labels, which `_normalize_severity` returns unchanged.
-Result: a single canonical vocabulary everywhere severity is read.
+`extract_severity` JSON branch: `return _normalize_severity(str(data[field]))`. The regex
+branch already emits canonical labels. **Both** severity-filter consumers normalize their
+*input* so alias filters keep working: `analyze_log_lines` (`server.py:888`) and
+`search_logs` (`server.py:1790`) — `{_normalize_severity(s) for s in severity_filter}`
+(drop `None`). The four MCP wrappers delegate to `analyze_log_lines`, so they inherit it.
 
-### Finding 1 — per-template severity over all lines
+### Finding 1/4 — per-template severity over all lines
 
-Add to `LogTemplate` (`server.py:212`):
+Add `severity_counts: dict[str, int] = field(default_factory=dict)` to `LogTemplate`
+(`server.py:212`). `LogTemplate.severity` keeps type `str | None` but its **meaning
+changes**: it is the **highest** severity present (derived from `severity_counts`), not
+the modal-of-first-10. `extract_templates` (`:558–579`) builds `severity_counts` over
+**all** member lines (each normalized), sets `severity` to the highest-rank key, and leads
+`examples` with a highest-severity line so it stays visible.
 
-```python
-severity_counts: dict[str, int] = field(default_factory=dict)
-```
+### Finding 3/7 — distribution + filter-matching ship with the semantics change
 
-`LogTemplate.severity` keeps type `str | None` but its **meaning changes**: it is now the
-**highest** severity present in the template (derived from `severity_counts`), not the
-modal-of-first-10. This is the right single value for a severity-prioritization tool.
+Because `severity` becomes highest-present, the three count-only distribution sites
+(markdown `:720–724`, compact `:789–793`, stats `:919–923`) and the `analyze_log_lines`
+filter (`:887–889`) become wrong **at that same commit** unless fixed together. So they
+are fixed in the **same task** as the `severity_counts`/highest-present change:
 
-`extract_templates` (`server.py:558–579`): build `severity_counts` over **all**
-`template_lines` (each normalized via `_normalize_severity`), set `severity` to the
-highest-rank key (None if empty). Build `examples` so at least one example of the highest
-severity present leads the list (so the high-severity line is visible), then fill with
-the first lines, deduped, capped at 3.
+- Distribution: sum `severity_counts` per key — `for t in cluster.templates: for sev, n
+  in t.severity_counts.items(): dist[sev] += n`. With aliases normalized, the canonical
+  display loop (`:728`) shows every level.
+- `analyze_log_lines` filter matches if **any** line in a template has the level:
+  `templates = [t for t in templates if severity_set & set(t.severity_counts)]` (also
+  fixes a latent miss where `--severity ERROR` skipped JSON `err` lines).
 
-### Finding 3 — severity-aware within-cluster display
+### Finding 5 — order clusters once (one source of truth)
 
-Both formatters select the cluster's lead templates and example by severity, then
-frequency:
+In `analyze_log_lines`, immediately after `cluster_templates_semantically(...)`:
+`clusters = _order_clusters(clusters)`. This ordered list feeds both
+`format_as_markdown(...)` and the `clusters_data` comprehension (whose `enumerate(...,1)`
+now yields severity-ordered `ClusterOutput.id`). `format_as_markdown` also calls
+`_order_clusters` at its top (idempotent on already-ordered input) so direct callers and
+its unit tests still get ordering. The heading `## Log Patterns by Frequency` →
+`## Log Patterns by Severity` (`:735`).
 
-- `top_templates` (markdown `:747`, compact `:805`):
-  `sorted(cluster.templates, key=lambda t: (_severity_rank(t.severity), t.count), reverse=True)[:N]`
-  (N=5 markdown, 3 compact).
-- Example (markdown `:753`, compact `:811`): take it from the highest-severity template,
-  `max(cluster.templates, key=lambda t: (_severity_rank(t.severity), t.count))`, instead
-  of `cluster.templates[0]`.
-- The per-template severity badge already prints (`:749`, `:807`); with `severity`=highest
-  it now reflects the most severe content.
+### Finding 3 (display) — severity-aware within-cluster selection
 
-### Cluster reorder (single site) + heading
-
-At the top of `format_as_markdown`, **before** the `if compact:` branch (covers the
-compact path via the `:702` caller):
-
-```python
-clusters = sorted(
-    clusters, key=lambda c: (_cluster_severity_rank(c), c.total_count), reverse=True
-)
-```
-
-`reverse=True` on the tuple sorts both fields descending. Python's sort is stable and the
-incoming order is already `total_count` desc, so ties are deterministic. Rename the
-heading `## Log Patterns by Frequency` → `## Log Patterns by Severity` (`server.py:735`).
-
-### Accurate severity distribution (3 sites)
-
-Replace `dist[t.severity] += t.count` with a per-key sum from `severity_counts`, at all
-three computations — markdown (`:720–724`), compact (`:789–793`), and `analyze_log_lines`
-stats (`:919–923`):
-
-```python
-for t in cluster.templates:
-    for sev, n in t.severity_counts.items():
-        dist[sev] += n
-```
-
-With aliases normalized, the canonical-only display loop (`:728`) now shows every level.
-
-### severity_filter (blast-radius fix)
-
-`analyze_log_lines` (`server.py:887–889`) filters by `t.severity`. With `severity`=highest
-that would wrongly drop a template whose filtered level is present but not highest. Match
-against `severity_counts` keys, with the filter normalized:
-
-```python
-severity_set = {_normalize_severity(s) for s in severity_filter}
-templates = [t for t in templates if severity_set & set(t.severity_counts)]
-```
-
-This also fixes a latent miss: `--severity ERROR` previously failed to match JSON
-`{"level":"err"}` lines.
-
-### ClusterOutput serialization
-
-The structured result selects `sorted(..., key=count)[:10]` (`server.py:931`). Make it
-severity-aware too — `key=lambda x: (_severity_rank(x.severity), x.count)` — so the
-programmatic `AnalysisResult.clusters` does not drop the ERROR template either.
-`TemplateOutput` is left unchanged (no `severity_counts` field) — surfacing the
-distribution in the MCP contract is F2 territory (YAGNI here).
+Both formatters and the `ClusterOutput` build use `_templates_by_priority`:
+- markdown top templates (`:747`) `[:5]`, example from `top_templates[0]` (`:752–755`).
+- compact top templates (`:805`) `[:3]`, example from `top_templates[0]` (`:811–813`).
+- `ClusterOutput` templates (`:931`) `[:10]`.
 
 ### None / unknown severity
 
-`severity=None` (no level detected) and unknown levels rank 0 (below DEBUG). A cluster
-only sinks to rank 0 if *all* its templates are unlabeled; the Severity Distribution
-section still reports their volumes — nothing hidden.
+`severity=None` and unknown levels rank 0 (below DEBUG). A cluster only sinks to rank 0
+if *all* its templates are unlabeled; the Severity Distribution still reports volumes.
 
 ## Scope
 
-**In scope:** the constants, helpers, `extract_severity` normalization, `LogTemplate`
-`severity_counts` + highest-severity semantics, `extract_templates` rewrite, cluster
-reorder + heading, severity-aware within-cluster display + example, three accurate
-distribution sites, severity-aware `ClusterOutput` `[:10]`, `severity_filter` via counts,
-and tests. Doc touch-ups (README/ROADMAP wording asserting frequency ordering).
+**In scope:** the constants + five helpers; `extract_severity` normalization; filter-input
+normalization in `analyze_log_lines` **and** `search_logs`; `LogTemplate.severity_counts`
++ highest-severity semantics; `extract_templates` rewrite; three accurate distribution
+sites; `analyze_log_lines` filter via `severity_counts`; `_order_clusters` applied in
+`analyze_log_lines` (feeding markdown + `clusters_data`) and in `format_as_markdown`;
+heading; severity-aware within-cluster display + example + `ClusterOutput[:10]`; tests.
+Doc touch-ups (README/ROADMAP wording asserting frequency ordering).
 
 **Out of scope (follow-ups):** exposing `severity_counts` in the MCP `TemplateOutput`
 contract (F2); per-cluster retrieval handles (F2); adaptive K (F4). Canonical
-`analysis.clusters` order and `cluster_id` are untouched — no `AnalysisResult` ordering
-change; the markdown display index ("Cluster N") may differ from stored index, which F2
-will address by exposing the real `cluster_id`.
+`cluster_templates_semantically` ordering is untouched; ordering is applied downstream in
+`analyze_log_lines`, so `ClusterOutput.id` is now severity-ordered consistently.
 
 ## Blast radius
 
 - `LogTemplate` gains `severity_counts` (internal dataclass, default keeps construction
   working; not persisted — no migration).
 - **`LogTemplate.severity` meaning changes** (modal → highest present). Consumers updated:
-  formatters (display), `severity_filter` (now via counts), `ClusterOutput.severity`
-  (now highest — an improvement), stats `severity_distribution` (now via counts).
-- **Output ordering + heading change** (user-facing) and **`severity_filter` behavior
-  change** (now matches if *any* line in the template has the level; normalizes aliases).
+  formatters, both filters, `ClusterOutput.severity` (now highest — improvement), stats
+  distribution.
+- **Output ordering + heading change** across markdown, CLI JSON, and UI;
+  `ClusterOutput.id` is now severity-ordered (was frequency).
+- **Both severity filters change** (match if any line has the level; normalize aliases).
 - No MCP/CLI signatures change; `TemplateOutput` contract unchanged.
 
 ## Test plan (TDD — failing test first)
 
-**Unit (`tests/test_server.py`):**
-1. `_normalize_severity` — `fatal`/`warn`/`err`/`trace` → CRITICAL/WARNING/ERROR/DEBUG;
-   unknown passes through; None/"" → None.
-2. `_severity_rank` / `_cluster_severity_rank` — max over templates; all-None → 0.
-3. `extract_templates` over all lines — collapsed-JSON case
-   (`100 info + 1 error`) → one template with `severity_counts={"INFO":100,"ERROR":1}`,
-   `severity=="ERROR"`, and an ERROR example present.
-4. Formatter mixed-cluster — 6 INFO templates + 1 rare ERROR template → ERROR template
-   and an ERROR example appear in both verbose and compact output (beyond the top-5/3
-   count limit).
-5. Within-tier ordering — two ERROR clusters, larger `total_count` first.
+**Unit (`tests/test_server.py`):** `_normalize_severity` aliases; `_severity_rank` /
+`_cluster_severity_rank`; `extract_templates` collapsed-JSON → `severity_counts` +
+`severity==ERROR` + ERROR example; `_templates_by_priority` ordering; formatter
+mixed-cluster surfaces ERROR template + example (verbose + compact); within-tier by
+frequency; distribution accuracy (`result.severity_distribution`); filter matches
+non-highest level; filter input alias normalized (`analyze` + `search_logs`);
+`clusters_data[0]` is the high-severity cluster; `ClusterOutput[:10]` includes a rare
+high-severity template.
 
-**End-to-end via `analyze_log_lines` (Finding 4):**
-6. JSON same-shape `100 info + 1 error`, small `token_budget` → markdown surfaces ERROR
-   (badge/example), ERROR content not truncated. (verbose + compact)
-7. JSON aliases — a `fatal` cluster ranks first; not sunk below DEBUG.
-8. Docker/plaintext INFO-dominated + one ERROR cluster, small budget → ERROR survives.
-9. Existing tests stay green (`test_extract_templates`, `test_get_logs_with_sample`,
-   `test_get_logs_severity_filter`).
+**End-to-end via `analyze_log_lines` / `search_logs`:** JSON same-shape ERROR visible +
+survives small budget (verbose + compact); JSON `fatal` alias ranks first; plaintext
+INFO-dominated ERROR survives; `search_logs(severity_filter=["err"|"warn"|"fatal"])` on
+JSON returns matches. Existing tests stay green.
 
 Gates: `uv run pytest -q` · `uv run ruff check src/ tests/` ·
 `uv run ruff format --check src/ tests/` · pre-commit passes.
@@ -265,12 +237,15 @@ Gates: `uv run pytest -q` · `uv run ruff check src/ tests/` ·
 | Change | Location |
 |--------|----------|
 | `SEVERITY_RANK`, `SEVERITY_ALIASES` | `server.py` constants (~`:51`) |
-| `_normalize_severity`, `_severity_rank`, `_cluster_severity_rank` | `server.py` near formatters |
-| Normalize JSON + regex severity | `extract_severity` (`:483`, JSON branch `:492`) |
+| `_normalize_severity`, `_severity_rank`, `_cluster_severity_rank`, `_order_clusters`, `_templates_by_priority` | `server.py` |
+| Normalize JSON severity | `extract_severity` (`:492`) |
+| Normalize filter input (2 sites) | `analyze_log_lines` (`:888`), `search_logs` (`:1790`) |
 | `severity_counts` field; `severity`=highest | `LogTemplate` (`:212`) |
 | Build `severity_counts` over all lines; high-severity example | `extract_templates` (`:558–579`) |
-| Reorder clusters; heading rename | `format_as_markdown` top (`<:701`), heading (`:735`) |
-| Severity-aware top templates + example | markdown (`:747`, `:753`), compact (`:805`, `:811`) |
 | Accurate distribution (3 sites) | `:720–724`, `:789–793`, `:919–923` |
-| Severity-aware `[:10]`; filter via counts | `ClusterOutput` (`:931`), filter (`:887–889`) |
+| `analyze_log_lines` filter via counts | `:887–889` |
+| `_order_clusters` (once) | `analyze_log_lines` after `:906`; `format_as_markdown` top (`<:701`) |
+| Heading rename | `:735` |
+| Severity-aware top templates + example | markdown (`:747`, `:752–755`), compact (`:805`, `:811–813`) |
+| Severity-aware `ClusterOutput[:10]` | `:931` |
 | Tests | `tests/test_server.py` |

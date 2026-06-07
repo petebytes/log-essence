@@ -2,34 +2,35 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When formatted output is truncated to a token budget, high-severity log clusters survive and their high-severity content is visible — instead of being crowded out by high-volume INFO noise.
+**Goal:** When formatted output is truncated to a token budget, high-severity log clusters survive and are visible — across markdown, CLI JSON, and UI alike — instead of being crowded out by high-volume INFO noise.
 
-**Architecture:** Preserve and normalize severity through extraction (one canonical vocabulary; per-template severity tracked over *all* lines as a distribution), then order clusters by `(highest severity, frequency)` at format time and select within-cluster templates/examples by the same key. No persisted-schema or MCP-signature changes.
+**Architecture:** Normalize severity to one canonical vocabulary at extraction; track per-template severity over *all* lines (a distribution, `severity` = highest present); order clusters once in `analyze_log_lines` by `(highest severity, frequency)` and feed that single ordered list to both the formatter and the JSON output; select within-cluster templates/examples by the same key. No persisted-schema or MCP-signature changes.
 
-**Tech Stack:** Python 3.11+, `uv`, `pytest`, `ruff`, Drain3 (template mining), FastEmbed/k-means (semantic clustering), Pydantic (output models). Spec: `docs/superpowers/specs/2026-06-06-f1-severity-weighted-budget-design.md`.
+**Tech Stack:** Python 3.11+, `uv`, `pytest`, `ruff`, Drain3, FastEmbed/k-means, Pydantic. Spec: `docs/superpowers/specs/2026-06-06-f1-severity-weighted-budget-design.md`.
 
 ---
 
 ## File Structure
 
-- `src/log_essence/server.py` — all logic changes: severity constants + helpers, `extract_severity` normalization, `LogTemplate` field, `extract_templates`, the two formatters, the three severity-distribution computations, the `severity_filter`, and the `ClusterOutput` build. (Single large module; follow the existing pattern rather than splitting.)
-- `tests/test_server.py` — all new tests (unit + end-to-end through `analyze_log_lines`). Append to the existing file.
-- `docs/superpowers/plans/2026-06-06-f1-severity-weighted-budget.md` — this plan.
-- Docs touch-up: `README.md` / `ROADMAP.md` wording asserting frequency ordering (Task 7).
+- `src/log_essence/server.py` — all logic: severity constants + 5 helpers, `extract_severity`, `LogTemplate`, `extract_templates`, the two formatters, three distribution sites, the two severity-filter consumers (`analyze_log_lines` + `search_logs`), the one-time cluster ordering, and the `ClusterOutput` build.
+- `tests/test_server.py` — all new tests (unit + end-to-end). Append to the existing file.
+- Docs touch-up: `README.md` / `ROADMAP.md` wording asserting frequency ordering (Task 6).
 
-**Conventions:** `defaultdict` is already imported in `server.py`. Tests use plain `pytest` functions. Run `redact=False` in analysis tests so redaction doesn't rewrite assertion substrings. Commit after each task. Pre-commit (ruff + ruff-format + gitleaks) must pass on every commit.
+**Each commit is internally correct** (no regressed intermediate states): filter-input normalization ships in Task 1; the highest-present severity change ships *with* its distribution + filter-matching fixes in Task 2. Run analysis tests with `redact=False` so redaction doesn't rewrite assertion substrings. Commit after each task; pre-commit (ruff + ruff-format + gitleaks) must pass. Do **not** edit `REPOMAP.md` (git hook regenerates it).
 
 ---
 
-## Task 1: Severity vocabulary — constants, normalization, rank
+## Task 1: Canonical severity vocabulary + normalize every filter input
+
+Fixes review findings #2 and #6 (alias normalization at extraction *and* at both filter consumers), with no alias-filter regression left for a later task.
 
 **Files:**
-- Modify: `src/log_essence/server.py` (constants block near `:51`; new helpers before `extract_severity` at `:483`; JSON branch of `extract_severity` at `:492`)
+- Modify: `src/log_essence/server.py` (constants `~:51`; helpers before `extract_severity` `:483`; JSON branch `:492`; `analyze_log_lines` filter input `:888`; `search_logs` filter input `:1790`)
 - Test: `tests/test_server.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Add the import and write the failing tests**
 
-Add to `tests/test_server.py` (ensure `extract_severity` is imported — it already is at the top of the file):
+In `tests/test_server.py`, add `analyze_log_lines` to the `from log_essence.server import (...)` block (it is **not** currently imported; later tasks reuse it). Then add:
 
 ```python
 def test_normalize_severity_aliases() -> None:
@@ -43,7 +44,7 @@ def test_normalize_severity_aliases() -> None:
     assert _normalize_severity("INFO") == "INFO"
     assert _normalize_severity(None) is None
     assert _normalize_severity("") is None
-    assert _normalize_severity("weirdlevel") == "WEIRDLEVEL"  # unknown passes through
+    assert _normalize_severity("weirdlevel") == "WEIRDLEVEL"
 
 
 def test_severity_rank_order() -> None:
@@ -62,16 +63,48 @@ def test_extract_severity_json_normalized() -> None:
     assert extract_severity('{"level":"warn","message":"x"}', "json") == "WARNING"
     assert extract_severity('{"severity":"ERR","message":"x"}', "json") == "ERROR"
     assert extract_severity('{"level":"trace","message":"x"}', "json") == "DEBUG"
+
+
+@pytest.mark.parametrize(
+    "log_level,filter_level",
+    [("warn", "warning"), ("err", "error"), ("fatal", "critical"), ("trace", "debug")],
+)
+def test_analyze_alias_filter_normalized(log_level: str, filter_level: str) -> None:
+    lines = ['{"level":"info","message":"a"}'] * 3 + [
+        f'{{"level":"{log_level}","message":"b"}}'
+    ] * 2
+    result = analyze_log_lines(
+        lines, token_budget=8000, num_clusters=10, severity_filter=[filter_level], redact=False
+    )
+    assert "No log patterns found" not in result.markdown
+
+
+@pytest.mark.parametrize(
+    "log_level,filter_level",
+    [("warn", "warning"), ("err", "error"), ("fatal", "critical"), ("trace", "debug")],
+)
+def test_search_logs_alias_filter_normalized(
+    tmp_path: Path, log_level: str, filter_level: str
+) -> None:
+    log_file = tmp_path / "s.log"
+    log_file.write_text(
+        '{"level":"info","message":"connection alpha"}\n'
+        f'{{"level":"{log_level}","message":"connection beta"}}\n'
+    )
+    result = search_logs(
+        path=str(log_file), query="connection", severity_filter=[filter_level]
+    )
+    assert "Search Results" in result
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/test_server.py::test_normalize_severity_aliases tests/test_server.py::test_severity_rank_order tests/test_server.py::test_extract_severity_json_normalized -v`
-Expected: FAIL — `ImportError: cannot import name '_normalize_severity'` (and the JSON test asserts `'FATAL' == 'CRITICAL'`).
+Run: `uv run pytest tests/test_server.py -k "normalize_severity or severity_rank or json_normalized or alias_filter" -v`
+Expected: FAIL — helper imports fail; `'FATAL' != 'CRITICAL'`; the alias-filter tests fail because the raw `{s.upper()}` filter input (`{"WARNING"}`) doesn't match the raw extracted level (`"WARN"`) and vice versa.
 
 - [ ] **Step 3: Add constants**
 
-In `src/log_essence/server.py`, just after the `JSON_LEVEL_FIELDS`/`JSON_TIME_FIELDS` constants (around `:52`), add:
+In `src/log_essence/server.py`, just after `JSON_TIME_FIELDS` (around `:52`):
 
 ```python
 SEVERITY_RANK = {"CRITICAL": 5, "ERROR": 4, "WARNING": 3, "INFO": 2, "DEBUG": 1}
@@ -90,7 +123,7 @@ SEVERITY_ALIASES = {
 
 - [ ] **Step 4: Add helper functions**
 
-In `src/log_essence/server.py`, immediately before `def extract_severity(` (`:483`), add:
+Immediately before `def extract_severity(` (`:483`):
 
 ```python
 def _normalize_severity(raw: str | None) -> str | None:
@@ -114,7 +147,7 @@ def _severity_rank(severity: str | None) -> int:
 
 - [ ] **Step 5: Normalize the JSON branch of `extract_severity`**
 
-In `extract_severity` (`:483`), the JSON branch currently returns `str(data[field]).upper()` (`:492`). Change it to normalize:
+In `extract_severity` (`:492`), change the JSON return to:
 
 ```python
                 for field in JSON_LEVEL_FIELDS:
@@ -122,39 +155,56 @@ In `extract_severity` (`:483`), the JSON branch currently returns `str(data[fiel
                         return _normalize_severity(str(data[field]))
 ```
 
-(The regex branch already returns canonical labels — leave it unchanged.)
+- [ ] **Step 6: Normalize the filter input in BOTH consumers**
 
-- [ ] **Step 6: Run tests to verify they pass**
+In `analyze_log_lines` (`:887–889`):
 
-Run: `uv run pytest tests/test_server.py::test_normalize_severity_aliases tests/test_server.py::test_severity_rank_order tests/test_server.py::test_extract_severity_json_normalized -v`
-Expected: PASS (3 passed).
+```python
+    # Apply severity filter
+    if severity_filter:
+        severity_set = {_normalize_severity(s) for s in severity_filter}
+        severity_set.discard(None)
+        templates = [t for t in templates if t.severity in severity_set]
+```
 
-Also confirm no regression in the existing severity test:
-Run: `uv run pytest tests/test_server.py::test_extract_severity -v`
+In `search_logs` (`:1789–1790`):
+
+```python
+    if severity_filter:
+        severity_set = {_normalize_severity(s) for s in severity_filter}
+        severity_set.discard(None)
+```
+
+(Leave the rest of each filter body unchanged in this task; `analyze_log_lines` matching moves to `severity_counts` in Task 2.)
+
+- [ ] **Step 7: Run tests to verify they pass**
+
+Run: `uv run pytest tests/test_server.py -k "normalize_severity or severity_rank or json_normalized or alias_filter" -v`
 Expected: PASS.
+Run: `uv run pytest tests/test_server.py::test_extract_severity tests/test_server.py::test_get_logs_severity_filter tests/test_server.py::test_search_logs_with_severity_filter -v`
+Expected: PASS (no regression).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/log_essence/server.py tests/test_server.py
-git commit -m "feat: normalize log severity aliases to a canonical vocabulary"
+git commit -m "feat: normalize severity aliases at extraction and both filter inputs"
 ```
 
 ---
 
-## Task 2: Per-template severity over all lines (highest-present)
+## Task 2: Per-template severity over all lines (+ distribution & filter-matching)
+
+Fixes review findings #1/#4 (track severity over all lines, highest-present) and ships the dependent corrections (#3/#7) in the same commit so the distribution and filter are never wrong: distribution sums `severity_counts`, and the `analyze_log_lines` filter matches if *any* line has the level.
 
 **Files:**
-- Modify: `src/log_essence/server.py` (`LogTemplate` dataclass `:212`; `extract_templates` `:545–581`)
+- Modify: `src/log_essence/server.py` (`LogTemplate` `:212`; `extract_templates` `:545–581`; distribution `:720–724`, `:789–793`, `:919–923`; `analyze_log_lines` filter `:887–889`)
 - Test: `tests/test_server.py`
 
-- [ ] **Step 1: Write the failing test**
-
-Add to `tests/test_server.py`:
+- [ ] **Step 1: Write the failing tests**
 
 ```python
 def test_extract_templates_tracks_severity_over_all_lines() -> None:
-    # Same-shape JSON: 100 INFO + 1 ERROR collapse to one Drain template.
     lines = ['{"level":"info","message":"request handled"}'] * 100
     lines.append('{"level":"error","message":"request handled"}')
 
@@ -163,22 +213,32 @@ def test_extract_templates_tracks_severity_over_all_lines() -> None:
     assert len(templates) == 1
     t = templates[0]
     assert t.count == 101
-    # severity counted across ALL lines, not just the first 10
     assert t.severity_counts == {"INFO": 100, "ERROR": 1}
-    # template severity is the HIGHEST present, not the modal
-    assert t.severity == "ERROR"
-    # an ERROR example is captured so the high-severity line is visible downstream
+    assert t.severity == "ERROR"  # highest present, not modal
     assert any(extract_severity(ex, "json") == "ERROR" for ex in t.examples)
+
+
+def test_severity_distribution_accurate_for_collapsed_json() -> None:
+    lines = ['{"level":"info","message":"x"}'] * 100 + ['{"level":"error","message":"x"}']
+    result = analyze_log_lines(lines, token_budget=8000, num_clusters=10, redact=False)
+    assert result.severity_distribution == {"INFO": 100, "ERROR": 1}
+
+
+def test_severity_filter_matches_non_highest_level() -> None:
+    lines = ['{"level":"info","message":"x"}'] * 50 + ['{"level":"error","message":"x"}']
+    result = analyze_log_lines(
+        lines, token_budget=8000, num_clusters=10, severity_filter=["INFO"], redact=False
+    )
+    # Template's highest severity is ERROR but it has 50 INFO lines -> must be kept
+    assert "No log patterns found" not in result.markdown
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/test_server.py::test_extract_templates_tracks_severity_over_all_lines -v`
-Expected: FAIL — `AttributeError: 'LogTemplate' object has no attribute 'severity_counts'` (and `severity` would be `'INFO'`).
+Run: `uv run pytest tests/test_server.py -k "tracks_severity_over_all_lines or distribution_accurate or filter_matches_non_highest" -v`
+Expected: FAIL — `LogTemplate` has no `severity_counts`; distribution is single-key; the `["INFO"]` filter drops the template (its `severity` will be `ERROR`).
 
 - [ ] **Step 3: Add the `severity_counts` field to `LogTemplate`**
-
-In `src/log_essence/server.py`, the `LogTemplate` dataclass (`:212`) becomes:
 
 ```python
 @dataclass
@@ -193,9 +253,9 @@ class LogTemplate:
     severity_counts: dict[str, int] = field(default_factory=dict)
 ```
 
-- [ ] **Step 4: Rewrite `extract_templates` severity handling**
+- [ ] **Step 4: Rewrite `extract_templates`**
 
-Replace the body of `extract_templates` (`:545–581`) with the version below. It computes each line's severity once in the first pass, then aggregates per template over **all** member lines, sets `severity` to the highest present, and leads `examples` with a highest-severity line.
+Replace the whole function body (`:545–581`) with:
 
 ```python
 def extract_templates(lines: list[str], log_format: str) -> list[LogTemplate]:
@@ -254,33 +314,78 @@ def extract_templates(lines: list[str], log_format: str) -> list[LogTemplate]:
     return templates
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 5: Fix the three distribution sites**
 
-Run: `uv run pytest tests/test_server.py::test_extract_templates_tracks_severity_over_all_lines -v`
+In `format_as_markdown` (`:720–724`):
+
+```python
+    # Severity summary (counted from per-template distributions)
+    severity_counts: dict[str, int] = defaultdict(int)
+    for cluster in clusters:
+        for template in cluster.templates:
+            for sev, n in template.severity_counts.items():
+                severity_counts[sev] += n
+```
+
+In `_format_compact` (`:789–793`):
+
+```python
+    # Severity counts on one line (from per-template distributions)
+    severity_counts: dict[str, int] = defaultdict(int)
+    for cluster in clusters:
+        for template in cluster.templates:
+            for sev, n in template.severity_counts.items():
+                severity_counts[sev] += n
+```
+
+In `analyze_log_lines` (`:919–923`):
+
+```python
+    # Compute severity distribution (from per-template distributions)
+    severity_distribution: dict[str, int] = defaultdict(int)
+    for cluster in clusters:
+        for template in cluster.templates:
+            for sev, n in template.severity_counts.items():
+                severity_distribution[sev] += n
+```
+
+- [ ] **Step 6: Switch the `analyze_log_lines` filter to match on `severity_counts`**
+
+In `analyze_log_lines` (`:887–889`, as left by Task 1):
+
+```python
+    # Apply severity filter (match if ANY line in the template has the level)
+    if severity_filter:
+        severity_set = {_normalize_severity(s) for s in severity_filter}
+        severity_set.discard(None)
+        templates = [t for t in templates if severity_set & set(t.severity_counts)]
+```
+
+- [ ] **Step 7: Run tests to verify they pass**
+
+Run: `uv run pytest tests/test_server.py -k "tracks_severity_over_all_lines or distribution_accurate or filter_matches_non_highest" -v`
 Expected: PASS.
+Run: `uv run pytest tests/test_server.py::test_extract_templates tests/test_server.py::test_get_logs_severity_filter tests/test_server.py::test_get_logs_with_sample -v`
+Expected: PASS (no regression).
 
-Confirm the existing template test still passes:
-Run: `uv run pytest tests/test_server.py::test_extract_templates -v`
-Expected: PASS (3 INFO lines → one template, `count == 3`).
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/log_essence/server.py tests/test_server.py
-git commit -m "feat: track per-template severity over all lines (highest-present)"
+git commit -m "feat: track per-template severity over all lines; fix distribution and filter"
 ```
 
 ---
 
-## Task 3: Order clusters by severity, then frequency
+## Task 3: Order clusters once (markdown + JSON agree) + heading
+
+Fixes review finding #5: order in `analyze_log_lines` so `clusters_data` (CLI/UI JSON) matches the markdown; `format_as_markdown` orders idempotently for direct callers.
 
 **Files:**
-- Modify: `src/log_essence/server.py` (new `_cluster_severity_rank` before `format_as_markdown` at `:685`; reorder inside `format_as_markdown` before the `if compact:` at `:701`; heading at `:735`)
+- Modify: `src/log_essence/server.py` (helpers before `format_as_markdown` `:685`; `format_as_markdown` top `<:701`; heading `:735`; `analyze_log_lines` after `cluster_templates_semantically` `~:906`)
 - Test: `tests/test_server.py`
 
 - [ ] **Step 1: Write the failing tests**
-
-Add to `tests/test_server.py`:
 
 ```python
 def test_cluster_severity_rank() -> None:
@@ -309,19 +414,30 @@ def test_cluster_severity_rank() -> None:
 
 
 def test_error_cluster_ordered_before_info_cluster() -> None:
-    # 500 INFO heartbeats (one cluster) + 1 ERROR (its own cluster).
     info_lines = [f"2025-01-01 INFO heartbeat ping {i}" for i in range(500)]
     error_lines = ["2025-01-01 ERROR payment gateway timeout"]
-
     result = analyze_log_lines(
         info_lines + error_lines, token_budget=8000, num_clusters=10, redact=False
     )
     md = result.markdown
-
     assert "payment gateway timeout" in md
     assert "heartbeat ping" in md
-    # ERROR cluster is rendered before the INFO cluster (severity-ordered)
     assert md.index("payment gateway timeout") < md.index("heartbeat ping")
+
+
+def test_clusters_data_ordered_by_severity() -> None:
+    info_lines = [f"2025-01-01 INFO heartbeat ping {i}" for i in range(500)]
+    error_lines = ["2025-01-01 ERROR payment gateway timeout"]
+    result = analyze_log_lines(
+        info_lines + error_lines, token_budget=8000, num_clusters=10, redact=False
+    )
+    assert result.clusters_data is not None
+    first = result.clusters_data[0]  # what CLI --format json / UI "Save JSON" emit first
+    assert first.id == 1
+    assert any(
+        "payment gateway timeout" in t.template or t.severity == "ERROR"
+        for t in first.templates
+    )
 
 
 def test_log_patterns_heading_is_severity() -> None:
@@ -331,71 +447,82 @@ def test_log_patterns_heading_is_severity() -> None:
     assert "## Log Patterns by Frequency" not in result.markdown
 ```
 
-Before these tests will run, add `analyze_log_lines` to the `from log_essence.server import (...)` block at the top of `tests/test_server.py` — it is **not** currently imported. (Later tasks reuse it; add it once here.)
-
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/test_server.py::test_cluster_severity_rank tests/test_server.py::test_error_cluster_ordered_before_info_cluster tests/test_server.py::test_log_patterns_heading_is_severity -v`
-Expected: FAIL — `ImportError: cannot import name '_cluster_severity_rank'`; the ordering test fails because INFO (count 500) sorts before ERROR; the heading test fails on the old "by Frequency" text.
+Run: `uv run pytest tests/test_server.py -k "cluster_severity_rank or ordered_before_info or clusters_data_ordered or heading_is_severity" -v`
+Expected: FAIL — helper import errors; INFO (count 500) precedes ERROR in both markdown and `clusters_data`; old heading text.
 
-- [ ] **Step 3: Add `_cluster_severity_rank`**
+- [ ] **Step 3: Add `_cluster_severity_rank` and `_order_clusters`**
 
-In `src/log_essence/server.py`, immediately before `def format_as_markdown(` (`:685`), add:
+Immediately before `def format_as_markdown(` (`:685`):
 
 ```python
 def _cluster_severity_rank(cluster: SemanticCluster) -> int:
     """Highest severity rank among a cluster's templates (0 if all unlabeled)."""
     return max((_severity_rank(t.severity) for t in cluster.templates), default=0)
-```
 
-- [ ] **Step 4: Reorder clusters at the top of `format_as_markdown`**
 
-In `format_as_markdown`, between the end of the docstring (`:700`) and the `if compact:` line (`:701`), insert the reorder so both the verbose and compact paths use it:
-
-```python
-    # Order clusters so the highest-severity content survives truncation;
-    # frequency breaks ties within a tier. reverse=True sorts both fields desc.
-    clusters = sorted(
+def _order_clusters(clusters: list[SemanticCluster]) -> list[SemanticCluster]:
+    """Order clusters by severity (highest first), then frequency. Deterministic + stable."""
+    return sorted(
         clusters,
         key=lambda c: (_cluster_severity_rank(c), c.total_count),
         reverse=True,
     )
+```
+
+- [ ] **Step 4: Order at the top of `format_as_markdown`**
+
+Between the docstring end (`:700`) and `if compact:` (`:701`):
+
+```python
+    # Order so high-severity content survives truncation (idempotent if already ordered)
+    clusters = _order_clusters(clusters)
 
     if compact:
         return _format_compact(clusters, log_format, total_lines, token_budget)
 ```
 
-- [ ] **Step 5: Rename the heading**
+- [ ] **Step 5: Order once in `analyze_log_lines` (the single source for all outputs)**
 
-In `format_as_markdown` (`:735`), change:
+In `analyze_log_lines`, immediately after `clusters = cluster_templates_semantically(templates, num_clusters)` (`~:906`):
+
+```python
+    # Order once here so markdown AND clusters_data (CLI/UI JSON) agree.
+    clusters = _order_clusters(clusters)
+```
+
+- [ ] **Step 6: Rename the heading**
+
+In `format_as_markdown` (`:735`):
 
 ```python
     sections.append("## Log Patterns by Severity\n\n")
 ```
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [ ] **Step 7: Run tests to verify they pass**
 
-Run: `uv run pytest tests/test_server.py::test_cluster_severity_rank tests/test_server.py::test_error_cluster_ordered_before_info_cluster tests/test_server.py::test_log_patterns_heading_is_severity -v`
-Expected: PASS (3 passed).
+Run: `uv run pytest tests/test_server.py -k "cluster_severity_rank or ordered_before_info or clusters_data_ordered or heading_is_severity" -v`
+Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/log_essence/server.py tests/test_server.py
-git commit -m "feat: order clusters by severity so high-severity survives truncation"
+git commit -m "feat: order clusters by severity once so all outputs agree"
 ```
 
 ---
 
 ## Task 4: Surface the highest-severity template + example within a cluster
 
+Fixes review finding #3 (display): a cluster that floats on severity must render its high-severity template and example.
+
 **Files:**
-- Modify: `src/log_essence/server.py` (new `_templates_by_priority` before `format_as_markdown` at `:685`; `format_as_markdown` top-templates `:747` + example `:752–755`; `_format_compact` top-templates `:805` + example `:811–813`)
+- Modify: `src/log_essence/server.py` (`_templates_by_priority` before `format_as_markdown`; `format_as_markdown` `:747`, `:752–755`; `_format_compact` `:805`, `:811–813`)
 - Test: `tests/test_server.py`
 
 - [ ] **Step 1: Write the failing tests**
-
-Add to `tests/test_server.py`:
 
 ```python
 def test_templates_by_priority_orders_severity_then_count() -> None:
@@ -406,8 +533,7 @@ def test_templates_by_priority_orders_severity_then_count() -> None:
         LogTemplate("b", 2, 1, severity="ERROR", severity_counts={"ERROR": 1}),
         LogTemplate("c", 3, 50, severity="INFO", severity_counts={"INFO": 50}),
     ]
-    ordered = _templates_by_priority(ts)
-    assert [t.template for t in ordered] == ["b", "a", "c"]  # ERROR first despite count 1
+    assert [t.template for t in _templates_by_priority(ts)] == ["b", "a", "c"]
 
 
 def test_mixed_cluster_surfaces_error_template_and_example() -> None:
@@ -415,23 +541,17 @@ def test_mixed_cluster_surfaces_error_template_and_example() -> None:
 
     templates = [
         LogTemplate(
-            f"info event {i}",
-            i,
-            100,
+            f"info event {i}", i, 100,
             examples=[f"2025-01-01 INFO info event {i}"],
-            severity="INFO",
-            severity_counts={"INFO": 100},
+            severity="INFO", severity_counts={"INFO": 100},
         )
         for i in range(6)
     ]
     templates.append(
         LogTemplate(
-            "disk corruption detected",
-            99,
-            1,
+            "disk corruption detected", 99, 1,
             examples=["2025-01-01 ERROR disk corruption detected"],
-            severity="ERROR",
-            severity_counts={"ERROR": 1},
+            severity="ERROR", severity_counts={"ERROR": 1},
         )
     )
     cluster = SemanticCluster(
@@ -439,7 +559,7 @@ def test_mixed_cluster_surfaces_error_template_and_example() -> None:
     )
 
     md = format_as_markdown([cluster], "docker", 601, token_budget=8000)
-    assert "disk corruption detected" in md  # ERROR template shown despite low count
+    assert "disk corruption detected" in md
 
     compact = format_as_markdown([cluster], "docker", 601, token_budget=8000, compact=True)
     assert "disk corruption detected" in compact
@@ -447,12 +567,12 @@ def test_mixed_cluster_surfaces_error_template_and_example() -> None:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `uv run pytest tests/test_server.py::test_templates_by_priority_orders_severity_then_count tests/test_server.py::test_mixed_cluster_surfaces_error_template_and_example -v`
-Expected: FAIL — `ImportError: cannot import name '_templates_by_priority'`; the mixed-cluster test fails because the count-sorted top-5/top-3 excludes the rare ERROR template.
+Run: `uv run pytest tests/test_server.py -k "templates_by_priority or mixed_cluster_surfaces" -v`
+Expected: FAIL — `_templates_by_priority` import error; the count-sorted top-5/top-3 excludes the rare ERROR template.
 
 - [ ] **Step 3: Add `_templates_by_priority`**
 
-In `src/log_essence/server.py`, immediately before `def format_as_markdown(` (next to `_cluster_severity_rank`), add:
+Next to `_order_clusters` (before `format_as_markdown`):
 
 ```python
 def _templates_by_priority(templates: list[LogTemplate]) -> list[LogTemplate]:
@@ -464,14 +584,14 @@ def _templates_by_priority(templates: list[LogTemplate]) -> list[LogTemplate]:
 
 - [ ] **Step 4: Use it in `format_as_markdown`**
 
-In `format_as_markdown`, replace the top-templates selection (`:747`):
+Top templates (`:747`):
 
 ```python
         # Add top templates (highest severity first, then frequency)
         top_templates = _templates_by_priority(cluster.templates)[:5]
 ```
 
-and replace the example block (`:752–755`) to use the lead (highest-priority) template:
+Example block (`:752–755`):
 
 ```python
         # Add example from the highest-severity template
@@ -482,13 +602,13 @@ and replace the example block (`:752–755`) to use the lead (highest-priority) 
 
 - [ ] **Step 5: Use it in `_format_compact`**
 
-In `_format_compact`, replace the top-templates selection (`:805`):
+Top templates (`:805`):
 
 ```python
         top_templates = _templates_by_priority(cluster.templates)[:3]
 ```
 
-and replace the example block (`:811–813`):
+Example block (`:811–813`):
 
 ```python
         # Only first example (from the highest-severity template), truncated
@@ -499,8 +619,8 @@ and replace the example block (`:811–813`):
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `uv run pytest tests/test_server.py::test_templates_by_priority_orders_severity_then_count tests/test_server.py::test_mixed_cluster_surfaces_error_template_and_example -v`
-Expected: PASS (2 passed).
+Run: `uv run pytest tests/test_server.py -k "templates_by_priority or mixed_cluster_surfaces" -v`
+Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
@@ -511,118 +631,7 @@ git commit -m "feat: surface highest-severity template and example within cluste
 
 ---
 
-## Task 5: Accurate severity distribution + any-line severity filter
-
-**Files:**
-- Modify: `src/log_essence/server.py` (markdown distribution `:720–724`; compact distribution `:789–793`; stats distribution `:919–923`; `severity_filter` `:887–889`)
-- Test: `tests/test_server.py`
-
-- [ ] **Step 1: Write the failing tests**
-
-Add to `tests/test_server.py`:
-
-```python
-def test_severity_distribution_accurate_for_collapsed_json() -> None:
-    lines = ['{"level":"info","message":"x"}'] * 100 + ['{"level":"error","message":"x"}']
-    result = analyze_log_lines(lines, token_budget=8000, num_clusters=10, redact=False)
-    # Distribution reflects BOTH levels with real counts, not all-INFO or all-ERROR
-    assert result.severity_distribution == {"INFO": 100, "ERROR": 1}
-
-
-def test_severity_filter_matches_non_highest_level() -> None:
-    # Collapsed template whose highest severity is ERROR but which has 50 INFO lines.
-    lines = ['{"level":"info","message":"x"}'] * 50 + ['{"level":"error","message":"x"}']
-    result = analyze_log_lines(
-        lines, token_budget=8000, num_clusters=10, severity_filter=["INFO"], redact=False
-    )
-    # Must be kept: the template contains INFO lines even though severity == ERROR
-    assert "No log patterns found" not in result.markdown
-
-
-def test_severity_filter_input_alias_normalized() -> None:
-    lines = ['{"level":"info","message":"a"}'] * 5 + ['{"level":"warning","message":"b"}'] * 3
-    result = analyze_log_lines(
-        lines, token_budget=8000, num_clusters=10, severity_filter=["warn"], redact=False
-    )
-    # "warn" filter normalizes to WARNING and matches the WARNING template
-    assert "No log patterns found" not in result.markdown
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `uv run pytest tests/test_server.py::test_severity_distribution_accurate_for_collapsed_json tests/test_server.py::test_severity_filter_matches_non_highest_level tests/test_server.py::test_severity_filter_input_alias_normalized -v`
-Expected: FAIL — distribution is `{"ERROR": 101}` (severity now == highest); the `["INFO"]` filter drops the template (its `severity` is `ERROR`); the `["warn"]` filter builds `{"WARN"}` which matches nothing.
-
-- [ ] **Step 3: Fix the markdown distribution**
-
-In `format_as_markdown` (`:720–724`), replace the distribution accumulation:
-
-```python
-    # Severity summary (counted from per-template distributions)
-    severity_counts: dict[str, int] = defaultdict(int)
-    for cluster in clusters:
-        for template in cluster.templates:
-            for sev, n in template.severity_counts.items():
-                severity_counts[sev] += n
-```
-
-- [ ] **Step 4: Fix the compact distribution**
-
-In `_format_compact` (`:789–793`), replace:
-
-```python
-    # Severity counts on one line (from per-template distributions)
-    severity_counts: dict[str, int] = defaultdict(int)
-    for cluster in clusters:
-        for template in cluster.templates:
-            for sev, n in template.severity_counts.items():
-                severity_counts[sev] += n
-```
-
-- [ ] **Step 5: Fix the stats distribution**
-
-In `analyze_log_lines` (`:919–923`), replace:
-
-```python
-    # Compute severity distribution (from per-template distributions)
-    severity_distribution: dict[str, int] = defaultdict(int)
-    for cluster in clusters:
-        for template in cluster.templates:
-            for sev, n in template.severity_counts.items():
-                severity_distribution[sev] += n
-```
-
-- [ ] **Step 6: Fix the severity filter**
-
-In `analyze_log_lines` (`:887–889`), replace:
-
-```python
-    # Apply severity filter (match if ANY line in the template has the level)
-    if severity_filter:
-        severity_set = {_normalize_severity(s) for s in severity_filter}
-        severity_set.discard(None)
-        templates = [t for t in templates if severity_set & set(t.severity_counts)]
-```
-
-- [ ] **Step 7: Run tests to verify they pass**
-
-Run: `uv run pytest tests/test_server.py::test_severity_distribution_accurate_for_collapsed_json tests/test_server.py::test_severity_filter_matches_non_highest_level tests/test_server.py::test_severity_filter_input_alias_normalized -v`
-Expected: PASS (3 passed).
-
-Confirm the existing filter test still passes:
-Run: `uv run pytest tests/test_server.py::test_get_logs_severity_filter -v`
-Expected: PASS.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add src/log_essence/server.py tests/test_server.py
-git commit -m "fix: accurate severity distribution and any-line severity filter"
-```
-
----
-
-## Task 6: Prioritize high-severity templates in structured cluster output
+## Task 5: Prioritize high-severity templates in structured cluster output
 
 **Files:**
 - Modify: `src/log_essence/server.py` (`ClusterOutput` template selection `:931`)
@@ -630,25 +639,13 @@ git commit -m "fix: accurate severity distribution and any-line severity filter"
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/test_server.py`:
-
 ```python
 def test_cluster_output_includes_high_severity_template() -> None:
-    # 12 structurally-distinct INFO templates (count 10 each) + 1 rare ERROR (count 1),
-    # forced into ONE semantic cluster (num_clusters=1). The output caps templates at 10.
     msgs = [
-        "user login succeeded",
-        "cache warmed up",
-        "config reloaded from disk",
-        "worker pool resized",
-        "scheduled job completed",
-        "metrics flushed to collector",
-        "session token refreshed",
-        "feature flag toggled",
-        "background sync finished",
-        "health probe responded",
-        "queue drained empty",
-        "snapshot persisted",
+        "user login succeeded", "cache warmed up", "config reloaded from disk",
+        "worker pool resized", "scheduled job completed", "metrics flushed to collector",
+        "session token refreshed", "feature flag toggled", "background sync finished",
+        "health probe responded", "queue drained empty", "snapshot persisted",
     ]
     lines: list[str] = []
     for m in msgs:
@@ -658,9 +655,7 @@ def test_cluster_output_includes_high_severity_template() -> None:
     result = analyze_log_lines(lines, token_budget=8000, num_clusters=1, redact=False)
 
     assert result.clusters_data is not None
-    # Sanity: the single cluster holds more templates than the output cap (10),
-    # so plain count-sorting would drop the rare ERROR.
-    assert max(len(c.templates) for c in result.clusters_data) >= 10
+    assert max(len(c.templates) for c in result.clusters_data) >= 10  # output caps at 10
     out_templates = [t.template for c in result.clusters_data for t in c.templates]
     assert any("critical subsystem failure" in t for t in out_templates)
 ```
@@ -668,14 +663,11 @@ def test_cluster_output_includes_high_severity_template() -> None:
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `uv run pytest tests/test_server.py::test_cluster_output_includes_high_severity_template -v`
-Expected: FAIL — the ERROR template (count 1) is excluded by the count-sorted `[:10]`, so the `any(...)` assertion fails.
-
-(If instead the sanity assertion `>= 10` fails, Drain merged some messages — make the message list more structurally varied until the single cluster holds ≥11 templates, then re-run to see the real failure.)
+Expected: FAIL — the count-sorted `[:10]` drops the rare ERROR (count 1). (If the `>= 10` sanity assertion fails instead, Drain merged messages — make the message list more structurally varied until the single cluster holds ≥11 templates, then re-run.)
 
 - [ ] **Step 3: Make the `ClusterOutput` selection severity-aware**
 
-In `analyze_log_lines`, the `clusters_data` comprehension selects templates via
-`sorted(cluster.templates, key=lambda x: x.count, reverse=True)[:10]` (`:931`). Replace that inner loop with the shared priority sort:
+In `analyze_log_lines`, the `clusters_data` comprehension selects templates via `sorted(cluster.templates, key=lambda x: x.count, reverse=True)[:10]` (`:931`). Replace the inner loop with:
 
 ```python
                 for t in _templates_by_priority(cluster.templates)[:10]
@@ -695,7 +687,7 @@ git commit -m "feat: prioritize high-severity templates in structured cluster ou
 
 ---
 
-## Task 7: End-to-end acceptance + full suite + docs
+## Task 6: End-to-end acceptance + full suite + docs
 
 **Files:**
 - Test: `tests/test_server.py`
@@ -703,44 +695,16 @@ git commit -m "feat: prioritize high-severity templates in structured cluster ou
 
 - [ ] **Step 1: Write the end-to-end acceptance tests**
 
-Add to `tests/test_server.py`:
-
 ```python
 def test_e2e_json_error_survives_small_budget() -> None:
-    # Many INFO message types (own clusters) + one low-volume ERROR message.
     info: list[str] = []
     for n in range(14):
         info += [f'{{"level":"info","message":"served route {n}"}}'] * 40
     err = ['{"level":"error","message":"upstream connection refused"}']
-
-    result = analyze_log_lines(
-        info + err, token_budget=400, num_clusters=10, redact=False
-    )
+    result = analyze_log_lines(info + err, token_budget=400, num_clusters=10, redact=False)
     md = result.markdown
-    assert "upstream connection refused" in md  # ERROR survived truncation
+    assert "upstream connection refused" in md  # ERROR survived
     assert "omitted" in md  # truncation actually happened
-
-
-def test_e2e_json_fatal_alias_ranks_first() -> None:
-    info = ['{"level":"info","message":"steady state"}'] * 300
-    fatal = ['{"level":"fatal","message":"kernel oops"}']
-    result = analyze_log_lines(
-        info + fatal, token_budget=8000, num_clusters=10, redact=False
-    )
-    md = result.markdown
-    assert "kernel oops" in md
-    assert md.index("kernel oops") < md.index("steady state")  # FATAL not sunk below INFO
-    assert result.severity_distribution.get("CRITICAL") == 1  # fatal -> CRITICAL
-
-
-def test_e2e_json_collapsed_error_is_visible() -> None:
-    # Same-shape collapse: the one ERROR must still surface in the rendered output.
-    lines = ['{"level":"info","message":"request handled"}'] * 200
-    lines.append('{"level":"error","message":"request handled"}')
-    result = analyze_log_lines(lines, token_budget=8000, num_clusters=10, redact=False)
-    md = result.markdown
-    assert "[ERROR]" in md  # severity badge reflects the highest present
-    assert result.severity_distribution == {"INFO": 200, "ERROR": 1}
 
 
 def test_e2e_compact_error_survives_small_budget() -> None:
@@ -751,32 +715,46 @@ def test_e2e_compact_error_survives_small_budget() -> None:
     result = analyze_log_lines(
         info + err, token_budget=400, num_clusters=10, redact=False, compact=True
     )
+    assert "upstream connection refused" in result.markdown
+    assert "omitted" in result.markdown
+
+
+def test_e2e_json_fatal_alias_ranks_first() -> None:
+    info = ['{"level":"info","message":"steady state"}'] * 300
+    fatal = ['{"level":"fatal","message":"kernel oops"}']
+    result = analyze_log_lines(info + fatal, token_budget=8000, num_clusters=10, redact=False)
     md = result.markdown
-    assert "upstream connection refused" in md
-    assert "omitted" in md
+    assert md.index("kernel oops") < md.index("steady state")
+    assert result.severity_distribution.get("CRITICAL") == 1  # fatal -> CRITICAL
+
+
+def test_e2e_json_collapsed_error_is_visible() -> None:
+    lines = ['{"level":"info","message":"request handled"}'] * 200
+    lines.append('{"level":"error","message":"request handled"}')
+    result = analyze_log_lines(lines, token_budget=8000, num_clusters=10, redact=False)
+    assert "[ERROR]" in result.markdown  # badge reflects the highest present
+    assert result.severity_distribution == {"INFO": 200, "ERROR": 1}
 ```
 
 - [ ] **Step 2: Run the acceptance tests**
 
 Run: `uv run pytest tests/test_server.py -k "e2e_" -v`
-Expected: PASS (4 passed). These exercise the full `analyze_log_lines` pipeline (extraction → clustering → ordered, severity-aware formatting). If `test_e2e_json_error_survives_small_budget` does not show `"omitted"`, raise the message-type count (`range(14)` → `range(20)`) or lower `token_budget` until truncation occurs, then confirm the ERROR still survives. If `[ERROR]` is absent in `test_e2e_json_collapsed_error_is_visible`, the badge format differs — assert on the exact badge produced by the formatter (`f"[{template.severity}] "`).
+Expected: PASS (4 passed). If `test_e2e_json_error_survives_small_budget` shows no `"omitted"`, raise `range(14)` → `range(20)` or lower `token_budget` until truncation occurs (ERROR must still survive). If `[ERROR]` is absent, assert on the exact badge produced by the formatter (`f"[{template.severity}] "`).
 
 - [ ] **Step 3: Run the full suite**
 
 Run: `uv run pytest -q`
-Expected: all prior tests (208 passed / 1 skipped baseline) plus the ~18 new tests pass. Investigate and fix any regression before continuing.
+Expected: baseline (208 passed / 1 skipped) plus the new tests pass. Fix any regression before continuing.
 
 - [ ] **Step 4: Lint and format**
 
-Run: `uv run ruff check src/ tests/`
-Expected: no errors.
-Run: `uv run ruff format --check src/ tests/`
-Expected: no changes needed (run `uv run ruff format src/ tests/` if it reports reformatting, then re-run the check).
+Run: `uv run ruff check src/ tests/` → no errors.
+Run: `uv run ruff format --check src/ tests/` → no changes (run `uv run ruff format src/ tests/` then re-check if it reports reformatting).
 
 - [ ] **Step 5: Update docs if they assert frequency ordering**
 
 Run: `grep -rn "by Frequency\|by frequency\|sorted by frequency\|frequency.*order" README.md ROADMAP.md`
-For any hit that describes output ordering as frequency-based, update the wording to reflect severity-first ordering (e.g. "patterns are listed highest-severity first, then by frequency"). If there are no such hits, skip. Do **not** edit `REPOMAP.md` (regenerated by a git hook).
+For any hit describing output ordering as frequency-based, reword to severity-first (e.g. "patterns are listed highest-severity first, then by frequency"). If none, skip. Do **not** edit `REPOMAP.md`.
 
 - [ ] **Step 6: Commit**
 
@@ -785,24 +763,25 @@ git add tests/test_server.py README.md ROADMAP.md
 git commit -m "test: end-to-end severity-budget acceptance; docs for ordering"
 ```
 
-(If no docs changed, drop them from the `git add`.)
+(Drop README.md/ROADMAP.md from `git add` if unchanged.)
 
 ---
 
-## Self-Review (performed against the spec)
+## Self-Review (performed against spec v3)
 
 **1. Spec coverage:**
-- Finding 2 (alias normalization) → Task 1. ✓
-- Finding 1 (per-template severity over all lines, highest-present, high-severity example) → Task 2. ✓
-- Tiered ordering + heading → Task 3. ✓
-- Finding 3 (within-cluster severity-aware display + example) → Task 4. ✓
-- Three accurate distribution sites + `severity_filter` via counts → Task 5. ✓
-- Severity-aware `ClusterOutput[:10]` → Task 6. ✓
-- Finding 4 (end-to-end tests: JSON same-shape, JSON aliases, plaintext, compact) → Task 7. ✓
-- `None`/unknown rank 0 → covered by `_severity_rank` (Task 1) + `_cluster_severity_rank` test (Task 3). ✓
+- Findings #2/#6 (alias normalization at extraction + both filter inputs) → Task 1. ✓
+- Findings #1/#4 (per-template severity over all lines, highest-present, high-severity example) + #3/#7 dependent distribution/filter-matching → Task 2 (same commit). ✓
+- Finding #5 (order once, markdown + clusters_data agree) + heading → Task 3. ✓
+- Finding #3 display (within-cluster severity-aware) → Task 4. ✓
+- Severity-aware `ClusterOutput[:10]` → Task 5. ✓
+- End-to-end (JSON same-shape, aliases, plaintext, compact) → Task 6. ✓
+- `None`/unknown rank 0 → `_severity_rank` (Task 1) + `_cluster_severity_rank` test (Task 3). ✓
 
-**2. Placeholder scan:** No TBD/TODO; every code step shows complete code; every test step shows the test body and the exact command + expected outcome. ✓
+**2. Placeholder scan:** No TBD/TODO; every code step shows complete code; every test step shows the body + exact command + expected outcome. ✓
 
-**3. Type/name consistency:** `_normalize_severity`, `_severity_rank` (Task 1) → used by `extract_templates` (Task 2), `_cluster_severity_rank` (Task 3), `_templates_by_priority` (Task 4). `severity_counts: dict[str,int]` defined in Task 2 → consumed in Tasks 3/5/6. `_templates_by_priority` defined in Task 4 → reused in Task 6. `AnalysisResult.severity_distribution` / `.clusters_data` (Pydantic, `ui/models.py`) used in Tasks 5/6/7 match the real field names. ✓
+**3. Type/name consistency:** `_normalize_severity`, `_severity_rank` (Task 1) → `extract_templates` (Task 2), `_cluster_severity_rank`/`_order_clusters` (Task 3), `_templates_by_priority` (Task 4/5). `severity_counts: dict[str,int]` (Task 2) → distribution/filter (Task 2), used by ordering helpers. `_order_clusters` applied in both `format_as_markdown` and `analyze_log_lines` (Task 3). `AnalysisResult.severity_distribution` / `.clusters_data`, `ClusterOutput.id/.templates`, `TemplateOutput.template/.severity` (Pydantic, `ui/models.py`) match real field names. ✓
 
-**Out-of-scope (per spec, not in this plan):** exposing `severity_counts` in `TemplateOutput` (F2), per-cluster retrieval (F2). Canonical `cluster_templates_semantically` ordering untouched.
+**4. Commit correctness:** Task 1 leaves no alias-filter regression; Task 2 fixes distribution + filter in the same commit as the severity-semantics change. No intermediate commit is regressed (safe under `AGENTS.md` push-at-session-end). ✓
+
+**Out-of-scope (per spec):** `severity_counts` in `TemplateOutput` (F2); per-cluster retrieval (F2); `cluster_templates_semantically` internal order untouched.
