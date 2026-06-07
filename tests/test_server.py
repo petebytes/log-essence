@@ -271,6 +271,34 @@ def test_mixed_cluster_surfaces_error_template_and_example() -> None:
     assert "disk corruption detected" in compact
 
 
+def test_cluster_output_includes_high_severity_template() -> None:
+    msgs = [
+        "user login succeeded",
+        "cache warmed up",
+        "config reloaded from disk",
+        "worker pool resized",
+        "scheduled job completed",
+        "metrics flushed to collector",
+        "session token refreshed",
+        "feature flag toggled",
+        "background sync finished",
+        "health probe responded",
+        "queue drained empty",
+        "snapshot persisted",
+    ]
+    lines: list[str] = []
+    for m in msgs:
+        lines += [f"2025-01-01 INFO {m}"] * 10
+    lines.append("2025-01-01 ERROR critical subsystem failure")
+
+    result = analyze_log_lines(lines, token_budget=8000, num_clusters=1, redact=False)
+
+    assert result.clusters_data is not None
+    assert max(len(c.templates) for c in result.clusters_data) >= 10  # output caps at 10
+    out_templates = [t.template for c in result.clusters_data for t in c.templates]
+    assert any("critical subsystem failure" in t for t in out_templates)
+
+
 def test_get_logs_file_not_found() -> None:
     result = get_logs(path="/nonexistent/path.log")
     assert "Error: Path does not exist" in result

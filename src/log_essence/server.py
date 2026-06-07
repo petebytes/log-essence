@@ -1023,7 +1023,7 @@ def analyze_log_lines(
                     severity=t.severity,
                     examples=t.examples[:3],  # Limit examples
                 )
-                for t in sorted(cluster.templates, key=lambda x: x.count, reverse=True)[:10]
+                for t in _templates_by_priority(cluster.templates)[:10]
             ],
         )
         for i, cluster in enumerate(clusters, 1)
