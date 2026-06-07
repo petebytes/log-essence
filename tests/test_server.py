@@ -9,6 +9,7 @@ import pytest
 from log_essence.server import (
     LogEntry,
     _format_sources_for_agent,
+    analyze_log_lines,
     detect_log_format,
     discover_log_sources,
     extract_exception_type,
@@ -73,6 +74,289 @@ def test_extract_templates() -> None:
     assert len(templates) == 1
     assert templates[0].count == 3
     assert "<*>" in templates[0].template
+
+
+def test_normalize_severity_aliases() -> None:
+    from log_essence.server import _normalize_severity
+
+    assert _normalize_severity("fatal") == "CRITICAL"
+    assert _normalize_severity("WARN") == "WARNING"
+    assert _normalize_severity("err") == "ERROR"
+    assert _normalize_severity("trace") == "DEBUG"
+    assert _normalize_severity("notice") == "INFO"
+    assert _normalize_severity("INFO") == "INFO"
+    assert _normalize_severity(None) is None
+    assert _normalize_severity("") is None
+    assert _normalize_severity("weirdlevel") == "WEIRDLEVEL"
+
+
+def test_severity_rank_order() -> None:
+    from log_essence.server import _severity_rank
+
+    assert _severity_rank("CRITICAL") > _severity_rank("ERROR")
+    assert _severity_rank("ERROR") > _severity_rank("WARNING")
+    assert _severity_rank("WARNING") > _severity_rank("INFO")
+    assert _severity_rank("INFO") > _severity_rank("DEBUG")
+    assert _severity_rank(None) == 0
+    assert _severity_rank("UNKNOWN") == 0
+
+
+def test_extract_severity_json_normalized() -> None:
+    assert extract_severity('{"level":"fatal","message":"x"}', "json") == "CRITICAL"
+    assert extract_severity('{"level":"warn","message":"x"}', "json") == "WARNING"
+    assert extract_severity('{"severity":"ERR","message":"x"}', "json") == "ERROR"
+    assert extract_severity('{"level":"trace","message":"x"}', "json") == "DEBUG"
+
+
+@pytest.mark.parametrize(
+    "log_level,filter_level",
+    [("warn", "warning"), ("err", "error"), ("fatal", "critical"), ("trace", "debug")],
+)
+def test_analyze_alias_filter_normalized(log_level: str, filter_level: str) -> None:
+    lines = ['{"level":"info","message":"a"}'] * 3 + [
+        f'{{"level":"{log_level}","message":"b"}}'
+    ] * 2
+    result = analyze_log_lines(
+        lines, token_budget=8000, num_clusters=10, severity_filter=[filter_level], redact=False
+    )
+    assert "No log patterns found" not in result.markdown
+
+
+@pytest.mark.parametrize(
+    "log_level,filter_level",
+    [("warn", "warning"), ("err", "error"), ("fatal", "critical"), ("trace", "debug")],
+)
+def test_search_logs_alias_filter_normalized(
+    tmp_path: Path, log_level: str, filter_level: str
+) -> None:
+    log_file = tmp_path / "s.log"
+    log_file.write_text(
+        '{"level":"info","message":"connection alpha"}\n'
+        f'{{"level":"{log_level}","message":"connection beta"}}\n'
+    )
+    result = search_logs(path=str(log_file), query="connection", severity_filter=[filter_level])
+    assert "Search Results" in result
+
+
+def test_extract_templates_tracks_severity_over_all_lines() -> None:
+    lines = ['{"level":"info","message":"request handled"}'] * 100
+    lines.append('{"level":"error","message":"request handled"}')
+
+    templates = extract_templates(lines, "json")
+
+    assert len(templates) == 1
+    t = templates[0]
+    assert t.count == 101
+    assert t.severity_counts == {"INFO": 100, "ERROR": 1}
+    assert t.severity == "ERROR"  # highest present, not modal
+    assert any(extract_severity(ex, "json") == "ERROR" for ex in t.examples)
+
+
+def test_severity_distribution_accurate_for_collapsed_json() -> None:
+    lines = ['{"level":"info","message":"x"}'] * 100 + ['{"level":"error","message":"x"}']
+    result = analyze_log_lines(lines, token_budget=8000, num_clusters=10, redact=False)
+    assert result.severity_distribution == {"INFO": 100, "ERROR": 1}
+
+
+def test_severity_filter_matches_non_highest_level() -> None:
+    lines = ['{"level":"info","message":"x"}'] * 50 + ['{"level":"error","message":"x"}']
+    result = analyze_log_lines(
+        lines, token_budget=8000, num_clusters=10, severity_filter=["INFO"], redact=False
+    )
+    # Template's highest severity is ERROR but it has 50 INFO lines -> must be kept
+    assert "No log patterns found" not in result.markdown
+
+
+def test_cluster_severity_rank() -> None:
+    from log_essence.server import (
+        LogTemplate,
+        SemanticCluster,
+        _cluster_severity_rank,
+        _severity_rank,
+    )
+
+    mixed = SemanticCluster(
+        templates=[
+            LogTemplate("a", 1, 100, severity="INFO", severity_counts={"INFO": 100}),
+            LogTemplate("b", 2, 1, severity="ERROR", severity_counts={"ERROR": 1}),
+        ],
+        centroid_idx=0,
+        total_count=101,
+        summary="a",
+    )
+    assert _cluster_severity_rank(mixed) == _severity_rank("ERROR")
+
+    unlabeled = SemanticCluster(
+        templates=[LogTemplate("x", 3, 5)], centroid_idx=0, total_count=5, summary="x"
+    )
+    assert _cluster_severity_rank(unlabeled) == 0
+
+
+def test_error_cluster_ordered_before_info_cluster() -> None:
+    info_lines = [f"2025-01-01 INFO heartbeat ping {i}" for i in range(500)]
+    error_lines = ["2025-01-01 ERROR payment gateway timeout"]
+    result = analyze_log_lines(
+        info_lines + error_lines, token_budget=8000, num_clusters=10, redact=False
+    )
+    md = result.markdown
+    assert "payment gateway timeout" in md
+    assert "heartbeat ping" in md
+    assert md.index("payment gateway timeout") < md.index("heartbeat ping")
+
+
+def test_clusters_data_ordered_by_severity() -> None:
+    info_lines = [f"2025-01-01 INFO heartbeat ping {i}" for i in range(500)]
+    error_lines = ["2025-01-01 ERROR payment gateway timeout"]
+    result = analyze_log_lines(
+        info_lines + error_lines, token_budget=8000, num_clusters=10, redact=False
+    )
+    assert result.clusters_data is not None
+    first = result.clusters_data[0]  # what CLI --format json / UI "Save JSON" emit first
+    assert first.id == 1
+    assert any(
+        "payment gateway timeout" in t.template or t.severity == "ERROR" for t in first.templates
+    )
+
+
+def test_log_patterns_heading_is_severity() -> None:
+    info_lines = [f"2025-01-01 INFO ping {i}" for i in range(5)]
+    result = analyze_log_lines(info_lines, token_budget=8000, num_clusters=3, redact=False)
+    assert "## Log Patterns by Severity" in result.markdown
+    assert "## Log Patterns by Frequency" not in result.markdown
+
+
+def test_templates_by_priority_orders_severity_then_count() -> None:
+    from log_essence.server import LogTemplate, _templates_by_priority
+
+    ts = [
+        LogTemplate("a", 1, 100, severity="INFO", severity_counts={"INFO": 100}),
+        LogTemplate("b", 2, 1, severity="ERROR", severity_counts={"ERROR": 1}),
+        LogTemplate("c", 3, 50, severity="INFO", severity_counts={"INFO": 50}),
+    ]
+    assert [t.template for t in _templates_by_priority(ts)] == ["b", "a", "c"]
+
+
+def test_mixed_cluster_surfaces_error_template_and_example() -> None:
+    from log_essence.server import LogTemplate, SemanticCluster, format_as_markdown
+
+    templates = [
+        LogTemplate(
+            f"info event {i}",
+            i,
+            100,
+            examples=[f"2025-01-01 INFO info event {i}"],
+            severity="INFO",
+            severity_counts={"INFO": 100},
+        )
+        for i in range(6)
+    ]
+    templates.append(
+        LogTemplate(
+            "disk corruption detected",
+            99,
+            1,
+            examples=["2025-01-01 ERROR disk corruption detected"],
+            severity="ERROR",
+            severity_counts={"ERROR": 1},
+        )
+    )
+    cluster = SemanticCluster(
+        templates=templates, centroid_idx=0, total_count=601, summary="info event 0"
+    )
+
+    md = format_as_markdown([cluster], "docker", 601, token_budget=8000)
+    assert "disk corruption detected" in md  # ERROR template shown despite low count
+
+    compact = format_as_markdown([cluster], "docker", 601, token_budget=8000, compact=True)
+    assert "disk corruption detected" in compact
+
+
+def test_cluster_output_includes_high_severity_template() -> None:
+    msgs = [
+        "user login succeeded",
+        "cache warmed up",
+        "config reloaded from disk",
+        "worker pool resized",
+        "scheduled job completed",
+        "metrics flushed to collector",
+        "session token refreshed",
+        "feature flag toggled",
+        "background sync finished",
+        "health probe responded",
+        "queue drained empty",
+        "snapshot persisted",
+    ]
+    lines: list[str] = []
+    for m in msgs:
+        lines += [f"2025-01-01 INFO {m}"] * 10
+    lines.append("2025-01-01 ERROR critical subsystem failure")
+
+    result = analyze_log_lines(lines, token_budget=8000, num_clusters=1, redact=False)
+
+    assert result.clusters_data is not None
+    assert max(len(c.templates) for c in result.clusters_data) >= 10  # output caps at 10
+    out_templates = [t.template for c in result.clusters_data for t in c.templates]
+    assert any("critical subsystem failure" in t for t in out_templates)
+
+
+# Structurally distinct messages -> distinct Drain templates -> many clusters.
+# (Numbered messages would collapse to one "<*>" template and never truncate.)
+_DISTINCT_MSGS = [
+    "user authenticated successfully",
+    "cache entry written to disk",
+    "configuration file parsed",
+    "database pool initialized",
+    "scheduled task dispatched",
+    "metrics exported to sink",
+    "session created for client",
+    "feature flag evaluated",
+    "background worker started",
+    "health endpoint queried",
+    "queue message acknowledged",
+    "snapshot committed to store",
+    "template rendered for view",
+    "webhook delivered downstream",
+]
+
+
+def test_e2e_json_error_survives_small_budget() -> None:
+    info: list[str] = []
+    for m in _DISTINCT_MSGS:
+        info += [f'{{"level":"info","message":"{m}"}}'] * 40
+    err = ['{"level":"error","message":"upstream connection refused"}']
+    result = analyze_log_lines(info + err, token_budget=400, num_clusters=10, redact=False)
+    md = result.markdown
+    assert "upstream connection refused" in md  # ERROR survived truncation
+    assert "omitted" in md  # truncation actually happened
+
+
+def test_e2e_compact_error_survives_small_budget() -> None:
+    info: list[str] = []
+    for m in _DISTINCT_MSGS:
+        info += [f"2025-01-01 INFO {m}"] * 40
+    err = ["2025-01-01 ERROR upstream connection refused"]
+    result = analyze_log_lines(
+        info + err, token_budget=200, num_clusters=10, redact=False, compact=True
+    )
+    assert "upstream connection refused" in result.markdown
+    assert "omitted" in result.markdown
+
+
+def test_e2e_json_fatal_alias_ranks_first() -> None:
+    info = ['{"level":"info","message":"steady state"}'] * 300
+    fatal = ['{"level":"fatal","message":"kernel oops"}']
+    result = analyze_log_lines(info + fatal, token_budget=8000, num_clusters=10, redact=False)
+    md = result.markdown
+    assert md.index("kernel oops") < md.index("steady state")
+    assert result.severity_distribution.get("CRITICAL") == 1  # fatal -> CRITICAL
+
+
+def test_e2e_json_collapsed_error_is_visible() -> None:
+    lines = ['{"level":"info","message":"request handled"}'] * 200
+    lines.append('{"level":"error","message":"request handled"}')
+    result = analyze_log_lines(lines, token_budget=8000, num_clusters=10, redact=False)
+    assert "[ERROR]" in result.markdown  # badge reflects the highest present
+    assert result.severity_distribution == {"INFO": 200, "ERROR": 1}
 
 
 def test_get_logs_file_not_found() -> None:

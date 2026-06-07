@@ -52,6 +52,33 @@ JSON_MESSAGE_FIELDS = ["message", "msg", "log", "text", "body", "content"]
 JSON_LEVEL_FIELDS = ["level", "severity", "lvl", "loglevel", "log_level"]
 JSON_TIME_FIELDS = ["timestamp", "time", "@timestamp", "ts", "datetime", "date"]
 
+# Severity ordering and alias normalization
+SEVERITY_RANK = {"CRITICAL": 5, "ERROR": 4, "WARNING": 3, "INFO": 2, "DEBUG": 1}
+
+SEVERITY_ALIASES = {
+    "FATAL": "CRITICAL",
+    "CRITICAL": "CRITICAL",
+    "CRIT": "CRITICAL",
+    "EMERG": "CRITICAL",
+    "EMERGENCY": "CRITICAL",
+    "ALERT": "CRITICAL",
+    "PANIC": "CRITICAL",
+    "SEVERE": "CRITICAL",
+    "ERROR": "ERROR",
+    "ERR": "ERROR",
+    "WARNING": "WARNING",
+    "WARN": "WARNING",
+    "INFO": "INFO",
+    "INFORMATION": "INFO",
+    "NOTICE": "INFO",
+    "DEBUG": "DEBUG",
+    "TRACE": "DEBUG",
+    "VERBOSE": "DEBUG",
+    "FINE": "DEBUG",
+    "FINER": "DEBUG",
+    "FINEST": "DEBUG",
+}
+
 # Timestamp extraction patterns
 TIMESTAMP_PATTERNS = [
     # ISO 8601 with optional milliseconds and timezone
@@ -218,6 +245,7 @@ class LogTemplate:
     count: int
     examples: list[str] = field(default_factory=list)
     severity: str | None = None
+    severity_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -480,6 +508,28 @@ def extract_json_message(line: str) -> str | None:
         return None
 
 
+def _normalize_severity(raw: str | None) -> str | None:
+    """Map a raw level string to a canonical severity.
+
+    Known aliases (FATAL, WARN, ERR, TRACE, NOTICE, ...) map to canonical names
+    (CRITICAL/ERROR/WARNING/INFO/DEBUG). Unknown non-empty levels pass through
+    uppercased (they rank 0). Empty/None -> None.
+    """
+    if not raw:
+        return None
+    key = raw.strip().upper()
+    if not key:
+        return None
+    return SEVERITY_ALIASES.get(key, key)
+
+
+def _severity_rank(severity: str | None) -> int:
+    """Rank a severity for ordering (higher = more severe; unknown/None = 0)."""
+    if severity is None:
+        return 0
+    return SEVERITY_RANK.get(severity, 0)
+
+
 def extract_severity(line: str, log_format: str) -> str | None:
     """Extract severity/level from a log line."""
     # Check JSON format first
@@ -489,7 +539,7 @@ def extract_severity(line: str, log_format: str) -> str | None:
             if isinstance(data, dict):
                 for field in JSON_LEVEL_FIELDS:
                     if field in data:
-                        return str(data[field]).upper()
+                        return _normalize_severity(str(data[field]))
         except json.JSONDecodeError:
             pass
 
@@ -546,6 +596,7 @@ def extract_templates(lines: list[str], log_format: str) -> list[LogTemplate]:
     """Extract log templates using Drain3."""
     miner = create_drain_miner()
     line_to_cluster: dict[int, int] = {}
+    line_severities: dict[int, str | None] = {}
 
     for i, line in enumerate(lines):
         normalized = normalize_line(line, log_format)
@@ -554,27 +605,41 @@ def extract_templates(lines: list[str], log_format: str) -> list[LogTemplate]:
 
         result = miner.add_log_message(normalized)
         line_to_cluster[i] = result["cluster_id"]
+        line_severities[i] = extract_severity(line, log_format)
 
     # Build template objects
     templates: list[LogTemplate] = []
     for cluster in miner.drain.clusters:
-        template_lines = [
-            lines[i] for i, cid in line_to_cluster.items() if cid == cluster.cluster_id
-        ]
+        member_idxs = [i for i, cid in line_to_cluster.items() if cid == cluster.cluster_id]
+        template_lines = [lines[i] for i in member_idxs]
 
-        # Extract severity from examples
-        severities = [extract_severity(line, log_format) for line in template_lines[:10]]
-        severity = None
-        if any(severities):
-            severity = max(set(s for s in severities if s), key=severities.count, default=None)
+        # Severity distribution across ALL member lines (normalized at extraction)
+        severity_counts: dict[str, int] = defaultdict(int)
+        for i in member_idxs:
+            sev = line_severities.get(i)
+            if sev:
+                severity_counts[sev] += 1
+
+        # Template severity = highest present (None if unlabeled)
+        severity = max(severity_counts, key=_severity_rank, default=None)
+
+        # Lead examples with a line of the highest severity so it stays visible
+        examples = template_lines[:3]
+        if severity is not None:
+            top_idx = next((i for i in member_idxs if line_severities.get(i) == severity), None)
+            if top_idx is not None:
+                top_example = lines[top_idx]
+                examples = [top_example] + [ln for ln in template_lines[:3] if ln != top_example]
+                examples = examples[:3]
 
         templates.append(
             LogTemplate(
                 template=cluster.get_template(),
                 cluster_id=cluster.cluster_id,
                 count=cluster.size,
-                examples=template_lines[:3],
+                examples=examples,
                 severity=severity,
+                severity_counts=dict(severity_counts),
             )
         )
 
@@ -682,6 +747,25 @@ def count_tokens(text: str, model: str = "gpt-4") -> int:
     return len(encoding.encode(text))
 
 
+def _cluster_severity_rank(cluster: SemanticCluster) -> int:
+    """Highest severity rank among a cluster's templates (0 if all unlabeled)."""
+    return max((_severity_rank(t.severity) for t in cluster.templates), default=0)
+
+
+def _order_clusters(clusters: list[SemanticCluster]) -> list[SemanticCluster]:
+    """Order clusters by severity (highest first), then frequency. Deterministic + stable."""
+    return sorted(
+        clusters,
+        key=lambda c: (_cluster_severity_rank(c), c.total_count),
+        reverse=True,
+    )
+
+
+def _templates_by_priority(templates: list[LogTemplate]) -> list[LogTemplate]:
+    """Sort templates by severity (highest first), then frequency."""
+    return sorted(templates, key=lambda t: (_severity_rank(t.severity), t.count), reverse=True)
+
+
 def format_as_markdown(
     clusters: list[SemanticCluster],
     log_format: str,
@@ -698,6 +782,9 @@ def format_as_markdown(
         token_budget: Maximum tokens in output.
         compact: If True, use abbreviated format for AI agent consumption.
     """
+    # Order so high-severity content survives truncation (idempotent if already ordered)
+    clusters = _order_clusters(clusters)
+
     if compact:
         return _format_compact(clusters, log_format, total_lines, token_budget)
 
@@ -716,12 +803,12 @@ def format_as_markdown(
 """
     sections.append(header)
 
-    # Severity summary
+    # Severity summary (counted from per-template distributions)
     severity_counts: dict[str, int] = defaultdict(int)
     for cluster in clusters:
         for template in cluster.templates:
-            if template.severity:
-                severity_counts[template.severity] += template.count
+            for sev, n in template.severity_counts.items():
+                severity_counts[sev] += n
 
     if severity_counts:
         severity_section = "## Severity Distribution\n\n"
@@ -732,7 +819,7 @@ def format_as_markdown(
         sections.append(severity_section)
 
     # Clusters
-    sections.append("## Log Patterns by Frequency\n\n")
+    sections.append("## Log Patterns by Severity\n\n")
 
     current_tokens = count_tokens("".join(sections))
 
@@ -743,15 +830,15 @@ def format_as_markdown(
         cluster_section += f"**Occurrences:** {cluster.total_count:,} | "
         cluster_section += f"**Patterns:** {len(cluster.templates)}\n\n"
 
-        # Add top templates
-        top_templates = sorted(cluster.templates, key=lambda t: t.count, reverse=True)[:5]
+        # Add top templates (highest severity first, then frequency)
+        top_templates = _templates_by_priority(cluster.templates)[:5]
         for template in top_templates:
             severity_badge = f"[{template.severity}] " if template.severity else ""
             cluster_section += f"- {severity_badge}`{template.template}` ({template.count:,}x)\n"
 
-        # Add example
-        if cluster.templates[0].examples:
-            example_text = cluster.templates[0].examples[0][:500]
+        # Add example from the highest-severity template
+        if top_templates and top_templates[0].examples:
+            example_text = top_templates[0].examples[0][:500]
             cluster_section += f"\n**Example:**\n```\n{example_text}\n```\n\n"
 
         cluster_section += "---\n\n"
@@ -785,12 +872,12 @@ def _format_compact(
         f"fmt={log_format} lines={total_lines:,} patterns={patterns} clusters={len(clusters)}"
     )
 
-    # Severity counts on one line
+    # Severity counts on one line (from per-template distributions)
     severity_counts: dict[str, int] = defaultdict(int)
     for cluster in clusters:
         for template in cluster.templates:
-            if template.severity:
-                severity_counts[template.severity] += template.count
+            for sev, n in template.severity_counts.items():
+                severity_counts[sev] += n
     if severity_counts:
         sev_parts = [f"{k}:{v}" for k, v in severity_counts.items()]
         parts.append("sev: " + " ".join(sev_parts))
@@ -802,14 +889,14 @@ def _format_compact(
         summary_text = cluster.summary[:60]
         cluster_lines = [f"[{i}] {summary_text} (n={cluster.total_count:,})"]
 
-        top_templates = sorted(cluster.templates, key=lambda t: t.count, reverse=True)[:3]
+        top_templates = _templates_by_priority(cluster.templates)[:3]
         for template in top_templates:
             sev = f"{template.severity} " if template.severity else ""
             cluster_lines.append(f"  {sev}{template.template} ({template.count}x)")
 
-        # Only first example, truncated
-        if cluster.templates[0].examples:
-            example_text = cluster.templates[0].examples[0][:200]
+        # Only first example (from the highest-severity template), truncated
+        if top_templates and top_templates[0].examples:
+            example_text = top_templates[0].examples[0][:200]
             cluster_lines.append(f"  ex: {example_text}")
 
         section = "\n".join(cluster_lines) + "\n"
@@ -885,8 +972,9 @@ def analyze_log_lines(
 
     # Apply severity filter
     if severity_filter:
-        severity_set = {s.upper() for s in severity_filter}
-        templates = [t for t in templates if t.severity in severity_set]
+        severity_set = {_normalize_severity(s) for s in severity_filter}
+        severity_set.discard(None)
+        templates = [t for t in templates if severity_set & set(t.severity_counts)]
 
     if not templates:
         elapsed_ms = (time.perf_counter() - start_time) * 1000
@@ -904,6 +992,9 @@ def analyze_log_lines(
     # Cluster semantically
     clusters = cluster_templates_semantically(templates, num_clusters)
 
+    # Order once here so markdown AND clusters_data (CLI/UI JSON) agree.
+    clusters = _order_clusters(clusters)
+
     # Format output
     markdown = format_as_markdown(
         clusters, log_format, len(all_lines), token_budget, compact=compact
@@ -912,12 +1003,12 @@ def analyze_log_lines(
     elapsed_ms = (time.perf_counter() - start_time) * 1000
     output_tokens = count_tokens(markdown)
 
-    # Compute severity distribution
+    # Compute severity distribution (from per-template distributions)
     severity_distribution: dict[str, int] = defaultdict(int)
     for cluster in clusters:
         for template in cluster.templates:
-            if template.severity:
-                severity_distribution[template.severity] += template.count
+            for sev, n in template.severity_counts.items():
+                severity_distribution[sev] += n
 
     # Convert clusters to output format
     clusters_data = [
@@ -932,7 +1023,7 @@ def analyze_log_lines(
                     severity=t.severity,
                     examples=t.examples[:3],  # Limit examples
                 )
-                for t in sorted(cluster.templates, key=lambda x: x.count, reverse=True)[:10]
+                for t in _templates_by_priority(cluster.templates)[:10]
             ],
         )
         for i, cluster in enumerate(clusters, 1)
@@ -1787,7 +1878,8 @@ def search_logs(
 
     # Apply severity filter
     if severity_filter:
-        severity_set = {s.upper() for s in severity_filter}
+        severity_set = {_normalize_severity(s) for s in severity_filter}
+        severity_set.discard(None)
         filtered_lines: list[str] = []
         for line in all_lines:
             severity = extract_severity(line, log_format)
