@@ -1954,12 +1954,17 @@ def _tee_cleanup() -> None:
             del _tee_cache[k]
 
 
-def tee_store(lines: list[str], source: str) -> str:
+def tee_store(
+    lines: list[str],
+    source: str,
+    cluster_line_indices: dict[int, list[int]] | None = None,
+) -> str:
     """Store raw log lines in the tee cache.
 
     Args:
         lines: Redacted log lines to cache.
         source: Source identifier for the logs.
+        cluster_line_indices: 1-based cluster id -> line indices, for per-cluster retrieval.
 
     Returns:
         Analysis ID that can be used to retrieve the lines.
@@ -1975,6 +1980,7 @@ def tee_store(lines: list[str], source: str) -> str:
             "source": source,
             "line_count": len(lines),
             "timestamp": datetime.now(UTC),
+            "cluster_line_indices": cluster_line_indices or {},
         }
 
     return analysis_id

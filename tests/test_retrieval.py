@@ -136,3 +136,19 @@ def test_extract_templates_records_member_indices() -> None:
     # member_indices size matches the template's own count.
     for t in templates:
         assert len(t.member_indices) == t.count
+
+
+def test_tee_store_persists_cluster_line_indices() -> None:
+    """tee_store records the cluster->indices map on the cache entry."""
+    from log_essence.server import _tee_cache, tee_store
+
+    aid = tee_store(["a", "b", "c"], "src", {1: [0, 2], 2: [1]})
+    assert _tee_cache[aid]["cluster_line_indices"] == {1: [0, 2], 2: [1]}
+
+
+def test_tee_store_defaults_cluster_line_indices_to_empty() -> None:
+    """Two-arg calls (no map) still produce a valid entry."""
+    from log_essence.server import _tee_cache, tee_store
+
+    aid = tee_store(["a"], "src")
+    assert _tee_cache[aid]["cluster_line_indices"] == {}
