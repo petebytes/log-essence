@@ -167,6 +167,64 @@ def test_severity_filter_matches_non_highest_level() -> None:
     assert "No log patterns found" not in result.markdown
 
 
+def test_cluster_severity_rank() -> None:
+    from log_essence.server import (
+        LogTemplate,
+        SemanticCluster,
+        _cluster_severity_rank,
+        _severity_rank,
+    )
+
+    mixed = SemanticCluster(
+        templates=[
+            LogTemplate("a", 1, 100, severity="INFO", severity_counts={"INFO": 100}),
+            LogTemplate("b", 2, 1, severity="ERROR", severity_counts={"ERROR": 1}),
+        ],
+        centroid_idx=0,
+        total_count=101,
+        summary="a",
+    )
+    assert _cluster_severity_rank(mixed) == _severity_rank("ERROR")
+
+    unlabeled = SemanticCluster(
+        templates=[LogTemplate("x", 3, 5)], centroid_idx=0, total_count=5, summary="x"
+    )
+    assert _cluster_severity_rank(unlabeled) == 0
+
+
+def test_error_cluster_ordered_before_info_cluster() -> None:
+    info_lines = [f"2025-01-01 INFO heartbeat ping {i}" for i in range(500)]
+    error_lines = ["2025-01-01 ERROR payment gateway timeout"]
+    result = analyze_log_lines(
+        info_lines + error_lines, token_budget=8000, num_clusters=10, redact=False
+    )
+    md = result.markdown
+    assert "payment gateway timeout" in md
+    assert "heartbeat ping" in md
+    assert md.index("payment gateway timeout") < md.index("heartbeat ping")
+
+
+def test_clusters_data_ordered_by_severity() -> None:
+    info_lines = [f"2025-01-01 INFO heartbeat ping {i}" for i in range(500)]
+    error_lines = ["2025-01-01 ERROR payment gateway timeout"]
+    result = analyze_log_lines(
+        info_lines + error_lines, token_budget=8000, num_clusters=10, redact=False
+    )
+    assert result.clusters_data is not None
+    first = result.clusters_data[0]  # what CLI --format json / UI "Save JSON" emit first
+    assert first.id == 1
+    assert any(
+        "payment gateway timeout" in t.template or t.severity == "ERROR" for t in first.templates
+    )
+
+
+def test_log_patterns_heading_is_severity() -> None:
+    info_lines = [f"2025-01-01 INFO ping {i}" for i in range(5)]
+    result = analyze_log_lines(info_lines, token_budget=8000, num_clusters=3, redact=False)
+    assert "## Log Patterns by Severity" in result.markdown
+    assert "## Log Patterns by Frequency" not in result.markdown
+
+
 def test_get_logs_file_not_found() -> None:
     result = get_logs(path="/nonexistent/path.log")
     assert "Error: Path does not exist" in result

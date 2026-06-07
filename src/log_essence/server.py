@@ -747,6 +747,20 @@ def count_tokens(text: str, model: str = "gpt-4") -> int:
     return len(encoding.encode(text))
 
 
+def _cluster_severity_rank(cluster: SemanticCluster) -> int:
+    """Highest severity rank among a cluster's templates (0 if all unlabeled)."""
+    return max((_severity_rank(t.severity) for t in cluster.templates), default=0)
+
+
+def _order_clusters(clusters: list[SemanticCluster]) -> list[SemanticCluster]:
+    """Order clusters by severity (highest first), then frequency. Deterministic + stable."""
+    return sorted(
+        clusters,
+        key=lambda c: (_cluster_severity_rank(c), c.total_count),
+        reverse=True,
+    )
+
+
 def format_as_markdown(
     clusters: list[SemanticCluster],
     log_format: str,
@@ -763,6 +777,9 @@ def format_as_markdown(
         token_budget: Maximum tokens in output.
         compact: If True, use abbreviated format for AI agent consumption.
     """
+    # Order so high-severity content survives truncation (idempotent if already ordered)
+    clusters = _order_clusters(clusters)
+
     if compact:
         return _format_compact(clusters, log_format, total_lines, token_budget)
 
@@ -797,7 +814,7 @@ def format_as_markdown(
         sections.append(severity_section)
 
     # Clusters
-    sections.append("## Log Patterns by Frequency\n\n")
+    sections.append("## Log Patterns by Severity\n\n")
 
     current_tokens = count_tokens("".join(sections))
 
@@ -969,6 +986,9 @@ def analyze_log_lines(
 
     # Cluster semantically
     clusters = cluster_templates_semantically(templates, num_clusters)
+
+    # Order once here so markdown AND clusters_data (CLI/UI JSON) agree.
+    clusters = _order_clusters(clusters)
 
     # Format output
     markdown = format_as_markdown(
