@@ -138,6 +138,35 @@ def test_search_logs_alias_filter_normalized(
     assert "Search Results" in result
 
 
+def test_extract_templates_tracks_severity_over_all_lines() -> None:
+    lines = ['{"level":"info","message":"request handled"}'] * 100
+    lines.append('{"level":"error","message":"request handled"}')
+
+    templates = extract_templates(lines, "json")
+
+    assert len(templates) == 1
+    t = templates[0]
+    assert t.count == 101
+    assert t.severity_counts == {"INFO": 100, "ERROR": 1}
+    assert t.severity == "ERROR"  # highest present, not modal
+    assert any(extract_severity(ex, "json") == "ERROR" for ex in t.examples)
+
+
+def test_severity_distribution_accurate_for_collapsed_json() -> None:
+    lines = ['{"level":"info","message":"x"}'] * 100 + ['{"level":"error","message":"x"}']
+    result = analyze_log_lines(lines, token_budget=8000, num_clusters=10, redact=False)
+    assert result.severity_distribution == {"INFO": 100, "ERROR": 1}
+
+
+def test_severity_filter_matches_non_highest_level() -> None:
+    lines = ['{"level":"info","message":"x"}'] * 50 + ['{"level":"error","message":"x"}']
+    result = analyze_log_lines(
+        lines, token_budget=8000, num_clusters=10, severity_filter=["INFO"], redact=False
+    )
+    # Template's highest severity is ERROR but it has 50 INFO lines -> must be kept
+    assert "No log patterns found" not in result.markdown
+
+
 def test_get_logs_file_not_found() -> None:
     result = get_logs(path="/nonexistent/path.log")
     assert "Error: Path does not exist" in result
