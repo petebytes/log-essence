@@ -52,6 +52,33 @@ JSON_MESSAGE_FIELDS = ["message", "msg", "log", "text", "body", "content"]
 JSON_LEVEL_FIELDS = ["level", "severity", "lvl", "loglevel", "log_level"]
 JSON_TIME_FIELDS = ["timestamp", "time", "@timestamp", "ts", "datetime", "date"]
 
+# Severity ordering and alias normalization
+SEVERITY_RANK = {"CRITICAL": 5, "ERROR": 4, "WARNING": 3, "INFO": 2, "DEBUG": 1}
+
+SEVERITY_ALIASES = {
+    "FATAL": "CRITICAL",
+    "CRITICAL": "CRITICAL",
+    "CRIT": "CRITICAL",
+    "EMERG": "CRITICAL",
+    "EMERGENCY": "CRITICAL",
+    "ALERT": "CRITICAL",
+    "PANIC": "CRITICAL",
+    "SEVERE": "CRITICAL",
+    "ERROR": "ERROR",
+    "ERR": "ERROR",
+    "WARNING": "WARNING",
+    "WARN": "WARNING",
+    "INFO": "INFO",
+    "INFORMATION": "INFO",
+    "NOTICE": "INFO",
+    "DEBUG": "DEBUG",
+    "TRACE": "DEBUG",
+    "VERBOSE": "DEBUG",
+    "FINE": "DEBUG",
+    "FINER": "DEBUG",
+    "FINEST": "DEBUG",
+}
+
 # Timestamp extraction patterns
 TIMESTAMP_PATTERNS = [
     # ISO 8601 with optional milliseconds and timezone
@@ -480,6 +507,28 @@ def extract_json_message(line: str) -> str | None:
         return None
 
 
+def _normalize_severity(raw: str | None) -> str | None:
+    """Map a raw level string to a canonical severity.
+
+    Known aliases (FATAL, WARN, ERR, TRACE, NOTICE, ...) map to canonical names
+    (CRITICAL/ERROR/WARNING/INFO/DEBUG). Unknown non-empty levels pass through
+    uppercased (they rank 0). Empty/None -> None.
+    """
+    if not raw:
+        return None
+    key = raw.strip().upper()
+    if not key:
+        return None
+    return SEVERITY_ALIASES.get(key, key)
+
+
+def _severity_rank(severity: str | None) -> int:
+    """Rank a severity for ordering (higher = more severe; unknown/None = 0)."""
+    if severity is None:
+        return 0
+    return SEVERITY_RANK.get(severity, 0)
+
+
 def extract_severity(line: str, log_format: str) -> str | None:
     """Extract severity/level from a log line."""
     # Check JSON format first
@@ -489,7 +538,7 @@ def extract_severity(line: str, log_format: str) -> str | None:
             if isinstance(data, dict):
                 for field in JSON_LEVEL_FIELDS:
                     if field in data:
-                        return str(data[field]).upper()
+                        return _normalize_severity(str(data[field]))
         except json.JSONDecodeError:
             pass
 
@@ -885,7 +934,8 @@ def analyze_log_lines(
 
     # Apply severity filter
     if severity_filter:
-        severity_set = {s.upper() for s in severity_filter}
+        severity_set = {_normalize_severity(s) for s in severity_filter}
+        severity_set.discard(None)
         templates = [t for t in templates if t.severity in severity_set]
 
     if not templates:
@@ -1787,7 +1837,8 @@ def search_logs(
 
     # Apply severity filter
     if severity_filter:
-        severity_set = {s.upper() for s in severity_filter}
+        severity_set = {_normalize_severity(s) for s in severity_filter}
+        severity_set.discard(None)
         filtered_lines: list[str] = []
         for line in all_lines:
             severity = extract_severity(line, log_format)

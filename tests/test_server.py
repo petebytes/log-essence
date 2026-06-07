@@ -9,6 +9,7 @@ import pytest
 from log_essence.server import (
     LogEntry,
     _format_sources_for_agent,
+    analyze_log_lines,
     detect_log_format,
     discover_log_sources,
     extract_exception_type,
@@ -73,6 +74,68 @@ def test_extract_templates() -> None:
     assert len(templates) == 1
     assert templates[0].count == 3
     assert "<*>" in templates[0].template
+
+
+def test_normalize_severity_aliases() -> None:
+    from log_essence.server import _normalize_severity
+
+    assert _normalize_severity("fatal") == "CRITICAL"
+    assert _normalize_severity("WARN") == "WARNING"
+    assert _normalize_severity("err") == "ERROR"
+    assert _normalize_severity("trace") == "DEBUG"
+    assert _normalize_severity("notice") == "INFO"
+    assert _normalize_severity("INFO") == "INFO"
+    assert _normalize_severity(None) is None
+    assert _normalize_severity("") is None
+    assert _normalize_severity("weirdlevel") == "WEIRDLEVEL"
+
+
+def test_severity_rank_order() -> None:
+    from log_essence.server import _severity_rank
+
+    assert _severity_rank("CRITICAL") > _severity_rank("ERROR")
+    assert _severity_rank("ERROR") > _severity_rank("WARNING")
+    assert _severity_rank("WARNING") > _severity_rank("INFO")
+    assert _severity_rank("INFO") > _severity_rank("DEBUG")
+    assert _severity_rank(None) == 0
+    assert _severity_rank("UNKNOWN") == 0
+
+
+def test_extract_severity_json_normalized() -> None:
+    assert extract_severity('{"level":"fatal","message":"x"}', "json") == "CRITICAL"
+    assert extract_severity('{"level":"warn","message":"x"}', "json") == "WARNING"
+    assert extract_severity('{"severity":"ERR","message":"x"}', "json") == "ERROR"
+    assert extract_severity('{"level":"trace","message":"x"}', "json") == "DEBUG"
+
+
+@pytest.mark.parametrize(
+    "log_level,filter_level",
+    [("warn", "warning"), ("err", "error"), ("fatal", "critical"), ("trace", "debug")],
+)
+def test_analyze_alias_filter_normalized(log_level: str, filter_level: str) -> None:
+    lines = ['{"level":"info","message":"a"}'] * 3 + [
+        f'{{"level":"{log_level}","message":"b"}}'
+    ] * 2
+    result = analyze_log_lines(
+        lines, token_budget=8000, num_clusters=10, severity_filter=[filter_level], redact=False
+    )
+    assert "No log patterns found" not in result.markdown
+
+
+@pytest.mark.parametrize(
+    "log_level,filter_level",
+    [("warn", "warning"), ("err", "error"), ("fatal", "critical"), ("trace", "debug")],
+)
+def test_search_logs_alias_filter_normalized(
+    tmp_path: Path, log_level: str, filter_level: str
+) -> None:
+    log_file = tmp_path / "s.log"
+    log_file.write_text(
+        '{"level":"info","message":"connection alpha"}\n'
+        f'{{"level":"{log_level}","message":"connection beta"}}\n'
+    )
+    result = search_logs(path=str(log_file), query="connection", severity_filter=[filter_level])
+    assert "Search Results" in result
 
 
 def test_get_logs_file_not_found() -> None:
