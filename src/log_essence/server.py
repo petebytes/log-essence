@@ -987,6 +987,7 @@ def analyze_log_lines(
                 original_tokens=original_tokens,
                 output_tokens=count_tokens(markdown),
             ),
+            analyzed_lines=all_lines,
         )
 
     # Cluster semantically
@@ -1041,6 +1042,7 @@ def analyze_log_lines(
         lines_processed=len(all_lines),
         severity_distribution=dict(severity_distribution),
         clusters_data=clusters_data,
+        analyzed_lines=all_lines,
     )
 
 
@@ -1124,8 +1126,9 @@ def get_logs(
 
     result = analyze_log_lines(all_lines, token_budget, num_clusters, severity_filter, redact)
 
-    # Store in tee cache for later retrieval via get_raw_logs
-    analysis_id = tee_store(all_lines, path)
+    # Cache the lines as analyzed (redacted per `redact`) so get_raw_logs returns
+    # redacted content for retrieval — never the original, un-redacted input.
+    analysis_id = tee_store(result.analyzed_lines, path)
 
     return result.markdown + f"\n\n_analysis_id: {analysis_id}_"
 
@@ -1978,7 +1981,9 @@ def get_raw_logs(
     """Retrieve raw (redacted) log lines from a previous analysis.
 
     After reviewing a log analysis summary, use this tool to get the full
-    log content for deeper investigation. Lines are already redacted.
+    log content for deeper investigation. Lines carry the same redaction
+    applied during analysis (redacted by default; raw only if that analysis
+    was run with redact=False).
 
     Args:
         analysis_id: The analysis ID returned from a previous get_logs call.
@@ -1997,10 +2002,18 @@ def get_raw_logs(
             "Re-run the analysis to generate a new cache."
         )
 
-    lines = entry["lines"][start_line : start_line + max_lines]
     total = entry["line_count"]
-    end = start_line + len(lines)
-    header = f"Source: {entry['source']} | Lines {start_line + 1}-{end} of {total}\n\n"
+    # Clamp into [0, total] so a negative offset never tail-slices and an
+    # over-range offset never yields a backwards "Lines 100-99" header.
+    start = max(0, min(start_line, total))
+    lines = entry["lines"][start : start + max_lines]
+    if not lines:
+        return (
+            f"Source: {entry['source']} | "
+            f"No lines in range (start_line={start_line}, total={total})"
+        )
+    end = start + len(lines)
+    header = f"Source: {entry['source']} | Lines {start + 1}-{end} of {total}\n\n"
     return header + "\n".join(lines)
 
 
