@@ -1303,7 +1303,7 @@ def get_docker_logs(
 **Tail:** {tail} lines per service
 
 """
-    return header + analysis.markdown
+    return header + _store_and_annotate(analysis, f"docker-compose: {compose_file.parent.name}")
 
 
 @mcp.tool()
@@ -1447,7 +1447,7 @@ def get_container_logs(
 **Tail:** {tail} lines
 
 """
-    return header + analysis.markdown
+    return header + _store_and_annotate(analysis, f"container: {container}")
 
 
 @mcp.tool()
@@ -1652,7 +1652,7 @@ def get_journald_logs(
     header_parts.append(f"**Lines:** {lines_limit}")
     header = "\n".join(header_parts) + "\n\n"
 
-    return header + analysis.markdown
+    return header + _store_and_annotate(analysis, f"journald: {unit}" if unit else "journald")
 
 
 def read_log_source(path: str) -> tuple[list[str], str]:

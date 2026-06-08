@@ -7,6 +7,7 @@ summary is redacted, so the on-demand full context must be too.
 
 import re
 from pathlib import Path
+from unittest.mock import patch
 
 from log_essence.server import get_logs, get_raw_logs
 
@@ -252,3 +253,51 @@ def test_cluster_retrieval_subset_of_global(tmp_path: Path) -> None:
 
     assert union  # non-empty
     assert union <= global_lines
+
+
+def _error_cluster_body(aid: str, marker: str = "boom") -> str:
+    """Body of the cluster whose lines contain `marker` (exercises cluster_id)."""
+    for cid in (1, 2):
+        body = get_raw_logs(analysis_id=aid, cluster_id=cid)
+        if marker in body:
+            return body
+    raise AssertionError(f"no cluster contained {marker!r}")
+
+
+def test_get_container_logs_supports_cluster_retrieval() -> None:
+    from log_essence.server import get_container_logs
+
+    sample = "\n".join(["ERROR boom user@acme.com"] * 2 + ["INFO heartbeat ok"] * 5)
+    with patch("log_essence.server.fetch_container_logs", return_value=sample):
+        out = get_container_logs(container="web")
+    assert "cluster_id=N" in out
+    body = _error_cluster_body(_analysis_id(out))  # real cluster_id round-trip
+    assert "boom" in body and "heartbeat" not in body  # per-cluster isolation
+    assert "user@acme.com" not in body and "[EMAIL:" in body  # redacted per-cluster
+
+
+def test_get_journald_logs_supports_cluster_retrieval() -> None:
+    from log_essence.server import get_journald_logs
+
+    sample = "\n".join(["ERROR boom"] * 2 + ["INFO heartbeat ok"] * 5)
+    with patch("log_essence.server.fetch_journald_logs", return_value=sample):
+        out = get_journald_logs(unit="nginx")
+    assert "_analysis_id:" in out and "cluster_id=N" in out
+    body = _error_cluster_body(_analysis_id(out))
+    assert "boom" in body and "heartbeat" not in body
+
+
+def test_get_docker_logs_supports_cluster_retrieval(tmp_path: Path) -> None:
+    from log_essence.server import get_docker_logs
+
+    sample = "\n".join(["ERROR boom"] * 2 + ["INFO heartbeat ok"] * 5)
+    compose_yml = tmp_path / "docker-compose.yml"
+    with (
+        patch("log_essence.server.discover_compose_file", return_value=compose_yml),
+        patch("log_essence.server.get_compose_services", return_value=[{"name": "web"}]),
+        patch("log_essence.server.fetch_docker_logs", return_value=sample),
+    ):
+        out = get_docker_logs(path=str(tmp_path))
+    assert "_analysis_id:" in out and "cluster_id=N" in out
+    body = _error_cluster_body(_analysis_id(out))
+    assert "boom" in body and "heartbeat" not in body
