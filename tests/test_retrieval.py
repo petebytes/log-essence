@@ -5,14 +5,17 @@ coverage. The headline guarantee is that retrieved lines are redacted: the
 summary is redacted, so the on-demand full context must be too.
 """
 
+import re
 from pathlib import Path
 
 from log_essence.server import get_logs, get_raw_logs
 
 
 def _analysis_id(get_logs_output: str) -> str:
-    """Pull the analysis_id out of the get_logs trailer '_analysis_id: <id>_'."""
-    return get_logs_output.rsplit("_analysis_id: ", 1)[1].strip().rstrip("_")
+    """Extract the 12-hex analysis_id by pattern (position-independent)."""
+    m = re.search(r"_analysis_id: ([0-9a-f]{12})_", get_logs_output)
+    assert m is not None, f"no analysis_id in output tail: {get_logs_output[-200:]!r}"
+    return m.group(1)
 
 
 def test_get_raw_logs_redacts_cached_lines(tmp_path: Path) -> None:
@@ -192,3 +195,60 @@ def test_get_raw_logs_cluster_id_within_cluster_pagination() -> None:
     assert "e1" in out and "e2" in out
     assert "e0" not in out and "e3" not in out
     assert "Lines 2-3 of 4" in out
+
+
+def test_get_logs_emits_cluster_hint_and_id_is_last(tmp_path: Path) -> None:
+    """The output carries the expand-a-cluster hint, and the id stays extractable."""
+    log_file = tmp_path / "app.log"
+    log_file.write_text("\n".join(["ERROR boom"] * 3 + ["INFO ok"] * 4) + "\n")
+
+    out = get_logs(path=str(log_file), redact=False)
+    assert "cluster_id=N" in out  # discoverability hint present
+    # id is still extractable and round-trips despite the trailing hint text
+    raw = get_raw_logs(analysis_id=_analysis_id(out))
+    assert "Lines 1-" in raw
+
+
+def test_get_logs_end_to_end_cluster_retrieval(tmp_path: Path) -> None:
+    """get_logs -> get_raw_logs(cluster_id) returns that cluster's redacted lines."""
+    log_file = tmp_path / "app.log"
+    lines = ["ERROR db pool exhausted user@acme.com"] * 2 + ["INFO heartbeat ok"] * 6
+    log_file.write_text("\n".join(lines) + "\n")
+
+    out = get_logs(path=str(log_file), redact=True)
+    aid = _analysis_id(out)
+
+    # Find the cluster id whose retrieved lines contain the ERROR pattern.
+    err_cluster = None
+    for cid in (1, 2):
+        body = get_raw_logs(analysis_id=aid, cluster_id=cid)
+        if "db pool exhausted" in body:
+            err_cluster = cid
+            assert "heartbeat" not in body
+            assert "user@acme.com" not in body  # redaction holds per-cluster
+            assert "[EMAIL:" in body
+    assert err_cluster is not None
+
+
+def test_cluster_retrieval_subset_of_global(tmp_path: Path) -> None:
+    """Coverage invariant: every cluster's lines are a subset of global retrieval."""
+    log_file = tmp_path / "app.log"
+    log_file.write_text("\n".join(["ERROR boom"] * 3 + ["INFO ok"] * 4 + ["WARN slow"] * 2) + "\n")
+    aid = _analysis_id(get_logs(path=str(log_file), redact=False))
+
+    def _lines(body: str) -> set[str]:
+        return set(body.split("\n\n", 1)[1].splitlines())
+
+    global_lines = _lines(get_raw_logs(analysis_id=aid, max_lines=10_000))
+
+    union: set[str] = set()
+    cid = 1
+    while True:
+        body = get_raw_logs(analysis_id=aid, cluster_id=cid, max_lines=10_000)
+        if "not found" in body.lower():
+            break
+        union |= _lines(body)
+        cid += 1
+
+    assert union  # non-empty
+    assert union <= global_lines

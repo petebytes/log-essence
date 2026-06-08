@@ -1064,6 +1064,21 @@ def resolve_glob_pattern(pattern: str) -> list[Path]:
     return []
 
 
+def _store_and_annotate(result: AnalysisResult, source: str) -> str:
+    """Cache the analyzed lines + cluster membership and append the retrieval trailer.
+
+    Shared by every tool that returns an analyze_log_lines summary, so the
+    discoverability hint and the analysis_id trailer are emitted in one place —
+    with the id as the FINAL token so it stays parseable.
+    """
+    analysis_id = tee_store(result.analyzed_lines, source, result.cluster_line_indices)
+    return (
+        result.markdown
+        + "\n\n_Expand one cluster: get_raw_logs(analysis_id, cluster_id=N)._"
+        + f"\n\n_analysis_id: {analysis_id}_"
+    )
+
+
 @mcp.tool()
 def get_logs(
     path: str,
@@ -1133,12 +1148,7 @@ def get_logs(
         all_lines = filter_by_time(all_lines, since_dt, log_format)
 
     result = analyze_log_lines(all_lines, token_budget, num_clusters, severity_filter, redact)
-
-    # Cache the lines as analyzed (redacted per `redact`) so get_raw_logs returns
-    # redacted content for retrieval — never the original, un-redacted input.
-    analysis_id = tee_store(result.analyzed_lines, path)
-
-    return result.markdown + f"\n\n_analysis_id: {analysis_id}_"
+    return _store_and_annotate(result, path)
 
 
 def discover_compose_file(path: str | None = None) -> Path | None:

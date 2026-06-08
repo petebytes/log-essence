@@ -3,7 +3,7 @@
 Auto-generated codebase orientation. Use this as a map to choose what to inspect; verify against source before editing.
 
 ## Freshness
-- Git: branch `feat/per-cluster-retrieval`, commit `27cfc5c`, tracked working tree dirty at generation time.
+- Git: branch `feat/per-cluster-retrieval`, commit `ab03437`, tracked working tree dirty at generation time.
 - Symbol skeleton budget: ~2000 tokens after this header.
 
 ## Agent pre-work process
