@@ -262,6 +262,20 @@ List Docker Compose services in a project.
 list_docker_services(path="/path/to/project")
 ```
 
+### Per-cluster retrieval
+
+Every analysis tool (`get_logs`, `get_docker_logs`, `get_container_logs`,
+`get_journald_logs`) ends its summary with an `analysis_id`. Pass it back to
+`get_raw_logs` to pull the full, **redacted** lines on demand:
+
+- `get_raw_logs(analysis_id)` — all lines (paginate with `start_line`/`max_lines`).
+- `get_raw_logs(analysis_id, cluster_id=N)` — only the lines behind "Cluster N"
+  from the summary, so an agent can expand exactly the cluster under
+  investigation without pulling the whole log back.
+
+Retrieved lines carry the same redaction as the summary (redacted unless that
+analysis was run with `redact=False`).
+
 ## Secret Redaction
 
 Logs are automatically redacted before analysis to prevent leaking sensitive data to external LLMs.

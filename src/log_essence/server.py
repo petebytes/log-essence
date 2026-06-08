@@ -246,6 +246,7 @@ class LogTemplate:
     examples: list[str] = field(default_factory=list)
     severity: str | None = None
     severity_counts: dict[str, int] = field(default_factory=dict)
+    member_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -640,6 +641,7 @@ def extract_templates(lines: list[str], log_format: str) -> list[LogTemplate]:
                 examples=examples,
                 severity=severity,
                 severity_counts=dict(severity_counts),
+                member_indices=member_idxs,
             )
         )
 
@@ -1030,6 +1032,11 @@ def analyze_log_lines(
         for i, cluster in enumerate(clusters, 1)
     ]
 
+    cluster_line_indices = {
+        i: sorted(idx for t in cluster.templates for idx in t.member_indices)
+        for i, cluster in enumerate(clusters, 1)
+    }
+
     return AnalysisResult(
         markdown=markdown,
         stats=AnalysisStats(
@@ -1043,6 +1050,7 @@ def analyze_log_lines(
         severity_distribution=dict(severity_distribution),
         clusters_data=clusters_data,
         analyzed_lines=all_lines,
+        cluster_line_indices=cluster_line_indices,
     )
 
 
@@ -1054,6 +1062,21 @@ def resolve_glob_pattern(pattern: str) -> list[Path]:
         matches = glob_module.glob(pattern, recursive=True)
         return [Path(m) for m in matches if Path(m).is_file()]
     return []
+
+
+def _store_and_annotate(result: AnalysisResult, source: str) -> str:
+    """Cache the analyzed lines + cluster membership and append the retrieval trailer.
+
+    Shared by every tool that returns an analyze_log_lines summary, so the
+    discoverability hint and the analysis_id trailer are emitted in one place —
+    with the id as the FINAL token so it stays parseable.
+    """
+    analysis_id = tee_store(result.analyzed_lines, source, result.cluster_line_indices)
+    return (
+        result.markdown
+        + "\n\n_Expand one cluster: get_raw_logs(analysis_id, cluster_id=N)._"
+        + f"\n\n_analysis_id: {analysis_id}_"
+    )
 
 
 @mcp.tool()
@@ -1125,12 +1148,7 @@ def get_logs(
         all_lines = filter_by_time(all_lines, since_dt, log_format)
 
     result = analyze_log_lines(all_lines, token_budget, num_clusters, severity_filter, redact)
-
-    # Cache the lines as analyzed (redacted per `redact`) so get_raw_logs returns
-    # redacted content for retrieval — never the original, un-redacted input.
-    analysis_id = tee_store(result.analyzed_lines, path)
-
-    return result.markdown + f"\n\n_analysis_id: {analysis_id}_"
+    return _store_and_annotate(result, path)
 
 
 def discover_compose_file(path: str | None = None) -> Path | None:
@@ -1285,7 +1303,7 @@ def get_docker_logs(
 **Tail:** {tail} lines per service
 
 """
-    return header + analysis.markdown
+    return header + _store_and_annotate(analysis, f"docker-compose: {compose_file.parent.name}")
 
 
 @mcp.tool()
@@ -1429,7 +1447,7 @@ def get_container_logs(
 **Tail:** {tail} lines
 
 """
-    return header + analysis.markdown
+    return header + _store_and_annotate(analysis, f"container: {container}")
 
 
 @mcp.tool()
@@ -1634,7 +1652,7 @@ def get_journald_logs(
     header_parts.append(f"**Lines:** {lines_limit}")
     header = "\n".join(header_parts) + "\n\n"
 
-    return header + analysis.markdown
+    return header + _store_and_annotate(analysis, f"journald: {unit}" if unit else "journald")
 
 
 def read_log_source(path: str) -> tuple[list[str], str]:
@@ -1946,12 +1964,17 @@ def _tee_cleanup() -> None:
             del _tee_cache[k]
 
 
-def tee_store(lines: list[str], source: str) -> str:
+def tee_store(
+    lines: list[str],
+    source: str,
+    cluster_line_indices: dict[int, list[int]] | None = None,
+) -> str:
     """Store raw log lines in the tee cache.
 
     Args:
         lines: Redacted log lines to cache.
         source: Source identifier for the logs.
+        cluster_line_indices: 1-based cluster id -> line indices, for per-cluster retrieval.
 
     Returns:
         Analysis ID that can be used to retrieve the lines.
@@ -1967,6 +1990,7 @@ def tee_store(lines: list[str], source: str) -> str:
             "source": source,
             "line_count": len(lines),
             "timestamp": datetime.now(UTC),
+            "cluster_line_indices": cluster_line_indices or {},
         }
 
     return analysis_id
@@ -1977,6 +2001,7 @@ def get_raw_logs(
     analysis_id: str,
     start_line: int = 0,
     max_lines: int = 500,
+    cluster_id: int | None = None,
 ) -> str:
     """Retrieve raw (redacted) log lines from a previous analysis.
 
@@ -1989,9 +2014,11 @@ def get_raw_logs(
         analysis_id: The analysis ID returned from a previous get_logs call.
         start_line: Line offset to start from (default: 0).
         max_lines: Maximum lines to return (default: 500).
+        cluster_id: If set, return only the lines of that cluster (the 1-based
+            "Cluster N" shown in the summary). Default None returns all lines.
 
     Returns:
-        Raw log lines from the cached analysis.
+        Raw log lines from the cached analysis (whole analysis, or one cluster).
     """
     with _tee_lock:
         entry = _tee_cache.get(analysis_id)
@@ -2002,18 +2029,34 @@ def get_raw_logs(
             "Re-run the analysis to generate a new cache."
         )
 
-    total = entry["line_count"]
+    if cluster_id is not None:
+        index_map = entry.get("cluster_line_indices") or {}
+        if cluster_id not in index_map:
+            n = len(index_map)
+            rng = f" (1-{n})" if n else ""
+            return (
+                f"Error: cluster_id {cluster_id} not found; "
+                f"analysis has {n} cluster{'s' if n != 1 else ''}{rng}."
+            )
+        source_lines = [entry["lines"][i] for i in index_map[cluster_id]]
+        total = len(source_lines)
+        label = f"Cluster {cluster_id} | "
+    else:
+        source_lines = entry["lines"]
+        total = entry["line_count"]
+        label = ""
+
     # Clamp into [0, total] so a negative offset never tail-slices and an
     # over-range offset never yields a backwards "Lines 100-99" header.
     start = max(0, min(start_line, total))
-    lines = entry["lines"][start : start + max_lines]
+    lines = source_lines[start : start + max_lines]
     if not lines:
         return (
             f"Source: {entry['source']} | "
             f"No lines in range (start_line={start_line}, total={total})"
         )
     end = start + len(lines)
-    header = f"Source: {entry['source']} | Lines {start + 1}-{end} of {total}\n\n"
+    header = f"Source: {entry['source']} | {label}Lines {start + 1}-{end} of {total}\n\n"
     return header + "\n".join(lines)
 
 

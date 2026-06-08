@@ -5,14 +5,18 @@ coverage. The headline guarantee is that retrieved lines are redacted: the
 summary is redacted, so the on-demand full context must be too.
 """
 
+import re
 from pathlib import Path
+from unittest.mock import patch
 
 from log_essence.server import get_logs, get_raw_logs
 
 
 def _analysis_id(get_logs_output: str) -> str:
-    """Pull the analysis_id out of the get_logs trailer '_analysis_id: <id>_'."""
-    return get_logs_output.rsplit("_analysis_id: ", 1)[1].strip().rstrip("_")
+    """Extract the 12-hex analysis_id by pattern (position-independent)."""
+    m = re.search(r"_analysis_id: ([0-9a-f]{12})_", get_logs_output)
+    assert m is not None, f"no analysis_id in output tail: {get_logs_output[-200:]!r}"
+    return m.group(1)
 
 
 def test_get_raw_logs_redacts_cached_lines(tmp_path: Path) -> None:
@@ -102,3 +106,198 @@ def test_get_raw_logs_redacts_under_strict_mode(tmp_path: Path) -> None:
     raw = get_raw_logs(analysis_id=_analysis_id(summary))
     assert "user@acme.com" not in raw
     assert "10.0.0.5" not in raw
+
+
+def test_analyze_log_lines_cluster_line_indices_match_clusters() -> None:
+    """cluster_line_indices is keyed by the same 1-based id as clusters_data, and
+    each id's index set has the cluster's 'Occurrences' size."""
+    from log_essence.server import analyze_log_lines
+
+    lines = ["ERROR boom"] * 3 + ["INFO heartbeat ok"] * 5
+    result = analyze_log_lines(lines, redact=False)
+
+    assert result.clusters_data is not None
+    cluster_ids = {c.id for c in result.clusters_data}
+    assert set(result.cluster_line_indices) == cluster_ids
+
+    for c in result.clusters_data:
+        idxs = result.cluster_line_indices[c.id]
+        assert len(idxs) == c.total_count
+        assert idxs == sorted(idxs)  # original file order
+
+
+def test_extract_templates_records_member_indices() -> None:
+    """Each template knows which input line indices belong to it (1 line -> 1 template)."""
+    from log_essence.server import detect_log_format, extract_templates
+
+    lines = ["ERROR boom alpha", "INFO ok", "ERROR boom beta", "INFO ok"]
+    fmt = detect_log_format(lines)
+    templates = extract_templates(lines, fmt)
+
+    # Every line index is covered exactly once across all templates.
+    covered = sorted(i for t in templates for i in t.member_indices)
+    assert covered == [0, 1, 2, 3]
+    # member_indices size matches the template's own count.
+    for t in templates:
+        assert len(t.member_indices) == t.count
+
+
+def test_tee_store_persists_cluster_line_indices() -> None:
+    """tee_store records the cluster->indices map on the cache entry."""
+    from log_essence.server import _tee_cache, tee_store
+
+    aid = tee_store(["a", "b", "c"], "src", {1: [0, 2], 2: [1]})
+    assert _tee_cache[aid]["cluster_line_indices"] == {1: [0, 2], 2: [1]}
+
+
+def test_tee_store_defaults_cluster_line_indices_to_empty() -> None:
+    """Two-arg calls (no map) still produce a valid entry."""
+    from log_essence.server import _tee_cache, tee_store
+
+    aid = tee_store(["a"], "src")
+    assert _tee_cache[aid]["cluster_line_indices"] == {}
+
+
+def test_get_raw_logs_cluster_id_returns_only_that_cluster() -> None:
+    from log_essence.server import get_raw_logs, tee_store
+
+    aid = tee_store(
+        ["err one", "info one", "err two", "info two"],
+        "src",
+        {1: [0, 2], 2: [1, 3]},
+    )
+    out = get_raw_logs(analysis_id=aid, cluster_id=1)
+    assert "err one" in out and "err two" in out
+    assert "info one" not in out and "info two" not in out
+    assert "Cluster 1" in out
+    assert "of 2" in out  # cluster 1 has 2 lines
+
+
+def test_get_raw_logs_cluster_id_out_of_range() -> None:
+    from log_essence.server import get_raw_logs, tee_store
+
+    aid = tee_store(["a"], "src", {1: [0]})
+    out = get_raw_logs(analysis_id=aid, cluster_id=9)
+    assert "not found" in out.lower()
+    assert "1 cluster" in out  # names the available count
+    # cluster_id is 1-based: 0 and negatives are out of range too
+    assert "not found" in get_raw_logs(analysis_id=aid, cluster_id=0).lower()
+    # an analysis with no clusters reports zero (no "(1-0)" range noise)
+    empty = tee_store(["x"], "src", {})
+    zero = get_raw_logs(analysis_id=empty, cluster_id=1)
+    assert "0 clusters" in zero and "(1-" not in zero
+
+
+def test_get_raw_logs_cluster_id_within_cluster_pagination() -> None:
+    from log_essence.server import get_raw_logs, tee_store
+
+    aid = tee_store(["e0", "e1", "e2", "e3", "skip"], "src", {1: [0, 1, 2, 3]})
+    out = get_raw_logs(analysis_id=aid, cluster_id=1, start_line=1, max_lines=2)
+    assert "e1" in out and "e2" in out
+    assert "e0" not in out and "e3" not in out
+    assert "Lines 2-3 of 4" in out
+
+
+def test_get_logs_emits_cluster_hint_and_id_is_last(tmp_path: Path) -> None:
+    """The output carries the expand-a-cluster hint, and the id stays extractable."""
+    log_file = tmp_path / "app.log"
+    log_file.write_text("\n".join(["ERROR boom"] * 3 + ["INFO ok"] * 4) + "\n")
+
+    out = get_logs(path=str(log_file), redact=False)
+    assert "cluster_id=N" in out  # discoverability hint present
+    # id is still extractable and round-trips despite the trailing hint text
+    raw = get_raw_logs(analysis_id=_analysis_id(out))
+    assert "Lines 1-" in raw
+
+
+def test_get_logs_end_to_end_cluster_retrieval(tmp_path: Path) -> None:
+    """get_logs -> get_raw_logs(cluster_id) returns that cluster's redacted lines."""
+    log_file = tmp_path / "app.log"
+    lines = ["ERROR db pool exhausted user@acme.com"] * 2 + ["INFO heartbeat ok"] * 6
+    log_file.write_text("\n".join(lines) + "\n")
+
+    out = get_logs(path=str(log_file), redact=True)
+    aid = _analysis_id(out)
+
+    # Find the cluster id whose retrieved lines contain the ERROR pattern.
+    err_cluster = None
+    for cid in (1, 2):
+        body = get_raw_logs(analysis_id=aid, cluster_id=cid)
+        if "db pool exhausted" in body:
+            err_cluster = cid
+            assert "heartbeat" not in body
+            assert "user@acme.com" not in body  # redaction holds per-cluster
+            assert "[EMAIL:" in body
+    assert err_cluster is not None
+
+
+def test_cluster_retrieval_subset_of_global(tmp_path: Path) -> None:
+    """Coverage invariant: every cluster's lines are a subset of global retrieval."""
+    log_file = tmp_path / "app.log"
+    log_file.write_text("\n".join(["ERROR boom"] * 3 + ["INFO ok"] * 4 + ["WARN slow"] * 2) + "\n")
+    aid = _analysis_id(get_logs(path=str(log_file), redact=False))
+
+    def _lines(body: str) -> set[str]:
+        return set(body.split("\n\n", 1)[1].splitlines())
+
+    global_lines = _lines(get_raw_logs(analysis_id=aid, max_lines=10_000))
+
+    union: set[str] = set()
+    cid = 1
+    while True:
+        body = get_raw_logs(analysis_id=aid, cluster_id=cid, max_lines=10_000)
+        if "not found" in body.lower():
+            break
+        union |= _lines(body)
+        cid += 1
+
+    assert union  # non-empty
+    assert union <= global_lines
+
+
+def _error_cluster_body(aid: str, marker: str = "boom") -> str:
+    """Body of the cluster whose lines contain `marker` (exercises cluster_id)."""
+    for cid in (1, 2):
+        body = get_raw_logs(analysis_id=aid, cluster_id=cid)
+        if marker in body:
+            return body
+    raise AssertionError(f"no cluster contained {marker!r}")
+
+
+def test_get_container_logs_supports_cluster_retrieval() -> None:
+    from log_essence.server import get_container_logs
+
+    sample = "\n".join(["ERROR boom user@acme.com"] * 2 + ["INFO heartbeat ok"] * 5)
+    with patch("log_essence.server.fetch_container_logs", return_value=sample):
+        out = get_container_logs(container="web")
+    assert "cluster_id=N" in out
+    body = _error_cluster_body(_analysis_id(out))  # real cluster_id round-trip
+    assert "boom" in body and "heartbeat" not in body  # per-cluster isolation
+    assert "user@acme.com" not in body and "[EMAIL:" in body  # redacted per-cluster
+
+
+def test_get_journald_logs_supports_cluster_retrieval() -> None:
+    from log_essence.server import get_journald_logs
+
+    sample = "\n".join(["ERROR boom"] * 2 + ["INFO heartbeat ok"] * 5)
+    with patch("log_essence.server.fetch_journald_logs", return_value=sample):
+        out = get_journald_logs(unit="nginx")
+    assert "_analysis_id:" in out and "cluster_id=N" in out
+    body = _error_cluster_body(_analysis_id(out))
+    assert "boom" in body and "heartbeat" not in body
+
+
+def test_get_docker_logs_supports_cluster_retrieval(tmp_path: Path) -> None:
+    from log_essence.server import get_docker_logs
+
+    sample = "\n".join(["ERROR boom"] * 2 + ["INFO heartbeat ok"] * 5)
+    compose_yml = tmp_path / "docker-compose.yml"
+    with (
+        patch("log_essence.server.discover_compose_file", return_value=compose_yml),
+        patch("log_essence.server.get_compose_services", return_value=[{"name": "web"}]),
+        patch("log_essence.server.fetch_docker_logs", return_value=sample),
+    ):
+        out = get_docker_logs(path=str(tmp_path))
+    assert "_analysis_id:" in out and "cluster_id=N" in out
+    body = _error_cluster_body(_analysis_id(out))
+    assert "boom" in body and "heartbeat" not in body
