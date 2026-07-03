@@ -9,8 +9,9 @@
 #
 # Fast, staged checks on every commit (ruff respects this repo's [tool.ruff]):
 #   ruff-check, ruff-format, gitleaks (secret scan)
-# CI remains the project-wide hard gate.
-default_install_hook_types: [pre-commit]
+# Project-wide pre-push checks replace the former GitHub CI gate:
+#   pytest, uv build
+default_install_hook_types: [pre-commit, pre-push]
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.6
@@ -24,3 +25,19 @@ repos:
     hooks:
       - id: gitleaks # scans the staged diff; every leak blocks
         stages: [pre-commit]
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest (project-wide)
+        entry: uv run pytest tests/ -v --tb=short
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+      - id: build
+        name: uv build
+        entry: uv build
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

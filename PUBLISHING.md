@@ -47,8 +47,7 @@ semantic-search
 
 ### 3. Enable GitHub Actions
 
-The repository includes CI/CD workflows:
-- `.github/workflows/ci.yml` - Runs on every push/PR
+The repository keeps release publishing in GitHub Actions. Local hooks handle tests, lint, formatting, and package build checks before push.
 - `.github/workflows/publish.yml` - Publishes to PyPI on release
 
 ## PyPI Setup
