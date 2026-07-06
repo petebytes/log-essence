@@ -16,7 +16,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -47,7 +47,7 @@ jobs:
         run: uv run pytest tests/ -v --tb=short
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     needs: test
 
     steps:
